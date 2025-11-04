@@ -22,18 +22,35 @@ export default async function handler(req, res) {
 
     for (const r of raffles) {
       // Отправляем сообщение в чат
-      await bot.telegram.sendMessage(
-        process.env.CHAT_ID,
-        `🎯 <b>${r.title}</b>\n\nКто первый нажмёт — тот победит 🏆`,
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
-            ],
-          },
-        }
-      );
+      if (r.image_url) {
+  await bot.telegram.sendPhoto(
+    process.env.CHAT_ID,
+    r.image_url,
+    {
+      caption: `🎯 <b>${r.title}</b>\nКто первый нажмёт — тот победит 🏆`,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
+        ],
+      },
+    }
+  );
+} else {
+  await bot.telegram.sendMessage(
+    process.env.CHAT_ID,
+    `🎯 <b>${r.title}</b>\nКто первый нажмёт — тот победит 🏆`,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
+        ],
+      },
+    }
+  );
+}
+
 
       // Обновляем статус дропа
       await sb
