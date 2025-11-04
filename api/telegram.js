@@ -117,7 +117,7 @@ bot.action(/join_(.+)/, async (ctx) => {
   const user = ctx.from;
 
   try {
-    // Проверяем, есть ли уже победитель
+    // Получаем сам дроп
     const { data: raffle } = await sb
       .from("raffles")
       .select("*")
@@ -126,10 +126,90 @@ bot.action(/join_(.+)/, async (ctx) => {
 
     if (!raffle) return ctx.answerCbQuery("Раффл не найден 😔");
 
+    // Если дроп уже закончен
     if (raffle.is_finished) {
-      await ctx.answerCbQuery("Поздно 😅");
-      return ctx.reply("❌ Дроп уже завершён! Победитель определён.");
+      await ctx.answerCbQuery("❌ Дроп уже завершён!");
+      return ctx.reply("Этот дроп уже закрыт, победители выбраны.");
     }
+
+    // Проверяем, сколько уже есть победителей
+    const { data: existingWinners } = await sb
+      .from("winners")
+      .select("*")
+      .eq("raffle_id", raffleId);
+
+    const winnersCount = existingWinners ? existingWinners.length : 0;
+
+    // Если лимит победителей достигнут
+    if (winnersCount >= raffle.winners_count) {
+      // закрываем дроп
+      await sb
+        .from("raffles")
+        .update({ is_finished: true })
+        .eq("id", raffleId);
+      await ctx.answerCbQuery("Все победители уже выбраны 😅");
+      return ctx.reply("❌ Дроп завершён, все победители определены!");
+    }
+
+    // Проверяем, не участвовал ли пользователь ранее
+    const { data: prevEntry } = await sb
+      .from("entries")
+      .select("*")
+      .eq("raffle_id", raffleId)
+      .eq("tg_user_id", user.id)
+      .single();
+
+    if (prevEntry) {
+      await ctx.answerCbQuery("Ты уже участвуешь 😎");
+      return;
+    }
+
+    // Добавляем запись об участии
+    await sb.from("entries").insert({
+      raffle_id: raffleId,
+      tg_user_id: user.id,
+      tg_username: user.username || null,
+    });
+
+    // Добавляем победителя
+    await sb.from("winners").insert({
+      raffle_id: raffleId,
+      tg_user_id: user.id,
+    });
+
+    await ctx.answerCbQuery("🎉 Ты победил!");
+    await ctx.reply(
+      `🏆 Поздравляем, ${user.first_name || "участник"}!\nТы стал победителем дропа <b>${raffle.title}</b> 🎯`,
+      { parse_mode: "HTML" }
+    );
+
+    // Проверяем — достигнут ли лимит после добавления
+    const { data: allWinners } = await sb
+      .from("winners")
+      .select("id")
+      .eq("raffle_id", raffleId);
+
+    if (allWinners.length >= raffle.winners_count) {
+      await sb
+        .from("raffles")
+        .update({ is_finished: true })
+        .eq("id", raffleId);
+
+      // сообщение в чат
+      if (process.env.CHAT_ID) {
+        await bot.telegram.sendMessage(
+          process.env.CHAT_ID,
+          `🎯 Дроп <b>${raffle.title}</b> завершён!\nПобедителей: ${raffle.winners_count}`,
+          { parse_mode: "HTML" }
+        );
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    await ctx.answerCbQuery("Ошибка 😔");
+  }
+});
+
 
     // Добавляем участника
     await sb.from("entries").insert({
