@@ -6,13 +6,9 @@ const bot = new Telegraf(process.env.BOT_TOKEN, {
 });
 
 function mainMenu() {
-  return Markup.keyboard([
-    ["👤 Мой профиль", "🎯 Рафлы"],
-    ["⚙️ Настройки"],
-  ]).resize();
+  return Markup.keyboard([["👤 Мой профиль", "🎯 Рафлы"], ["⚙️ Настройки"]]).resize();
 }
 
-// 📍 сохранить/обновить пользователя
 async function saveUser(ctx) {
   const u = ctx.from;
   if (!u) return;
@@ -25,25 +21,18 @@ async function saveUser(ctx) {
   });
 }
 
-// 🚀 старт
+// /start
 bot.start(async (ctx) => {
   await saveUser(ctx);
-  await ctx.reply(
-    "Добро пожаловать в Cloud Market 🎯\nВыбери пункт меню ниже:",
-    mainMenu()
-  );
+  await ctx.reply("Добро пожаловать в Cloud Market 🎯\nВыбери пункт меню ниже:", mainMenu());
 });
 
-// 👤 профиль
+// Мой профиль
 bot.hears("👤 Мой профиль", async (ctx) => {
   await saveUser(ctx);
   const id = ctx.from.id;
 
-  const { data: user } = await sb
-    .from("users")
-    .select("*")
-    .eq("tg_user_id", id)
-    .single();
+  const { data: user } = await sb.from("users").select("*").eq("tg_user_id", id).single();
 
   const { data: wins } = await sb
     .from("winners")
@@ -62,9 +51,7 @@ bot.hears("👤 Мой профиль", async (ctx) => {
       ? wins
           .map(
             (e, i) =>
-              `${i + 1}. ${e.raffle_id.slice(0, 8)}... — ${new Date(
-                e.decided_at
-              ).toLocaleString()}`
+              `${i + 1}. ${e.raffle_id.slice(0, 8)}... — ${new Date(e.decided_at).toLocaleString()}`
           )
           .join("\n")
       : "Пока нет побед 😔",
@@ -73,7 +60,7 @@ bot.hears("👤 Мой профиль", async (ctx) => {
   return ctx.reply(text, { parse_mode: "HTML", ...mainMenu() });
 });
 
-// 🎯 активные дропы
+// Рафлы (активные)
 bot.hears("🎯 Рафлы", async (ctx) => {
   const { data: raffles } = await sb
     .from("raffles")
@@ -81,58 +68,43 @@ bot.hears("🎯 Рафлы", async (ctx) => {
     .eq("is_finished", false)
     .order("starts_at", { ascending: true });
 
-  if (!raffles || raffles.length === 0)
+  if (!raffles || raffles.length === 0) {
     return ctx.reply("❌ Сейчас нет активных дропов.", mainMenu());
+  }
 
   for (const r of raffles) {
     const text = `🎯 <b>${r.title}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
-    const button = Markup.inlineKeyboard([
-      [Markup.button.callback("🪩 Участвовать", `join_${r.id}`)],
-    ]);
+    const button = Markup.inlineKeyboard([[Markup.button.callback("🪩 Участвовать", `join_${r.id}`)]]);
 
     if (r.image_url) {
-      await ctx.replyWithPhoto(r.image_url, {
-        caption: text,
-        parse_mode: "HTML",
-        ...button,
-      });
+      await ctx.replyWithPhoto(r.image_url, { caption: text, parse_mode: "HTML", ...button });
     } else {
       await ctx.reply(text, { parse_mode: "HTML", ...button });
     }
   }
 });
 
-// ⚙️ настройки
+// Настройки
 bot.hears("⚙️ Настройки", async (ctx) => {
-  return ctx.reply(
-    "Настройки пока простые:\n— язык: auto\n— уведомления: включены 🔔",
-    mainMenu()
-  );
+  return ctx.reply("Настройки пока простые:\n— язык: auto\n— уведомления: включены 🔔", mainMenu());
 });
 
-// 🪩 участие
+// Участие (поддержка нескольких победителей)
 bot.action(/join_(.+)/, async (ctx) => {
   const raffleId = ctx.match[1];
   const user = ctx.from;
 
   try {
-    const { data: raffle } = await sb
-      .from("raffles")
-      .select("*")
-      .eq("id", raffleId)
-      .single();
-
+    const { data: raffle } = await sb.from("raffles").select("*").eq("id", raffleId).single();
     if (!raffle) return ctx.answerCbQuery("Раффл не найден 😔");
+
     if (raffle.is_finished) {
       await ctx.answerCbQuery("❌ Дроп завершён!");
       return ctx.reply("❌ Дроп уже закрыт!");
     }
 
-    // Проверяем победителей
-    const { data: existing } = await sb
-      .from("winners")
-      .select("*")
-      .eq("raffle_id", raffleId);
+    // Сколько уже победителей
+    const { data: existing } = await sb.from("winners").select("id").eq("raffle_id", raffleId);
     const count = existing?.length || 0;
 
     if (count >= raffle.winners_count) {
@@ -140,24 +112,26 @@ bot.action(/join_(.+)/, async (ctx) => {
       return ctx.answerCbQuery("Все победители уже выбраны 😅");
     }
 
-    // Проверяем, участвовал ли пользователь
+    // Уже участвует?
     const { data: prev } = await sb
       .from("entries")
-      .select("*")
+      .select("id")
       .eq("raffle_id", raffleId)
       .eq("tg_user_id", user.id)
-      .single();
+      .maybeSingle();
 
-    if (prev) return ctx.answerCbQuery("Ты уже участвуешь 😎");
+    if (prev) {
+      return ctx.answerCbQuery("Ты уже участвуешь 😎");
+    }
 
-    // Добавляем участие
+    // Записываем участие
     await sb.from("entries").insert({
       raffle_id: raffleId,
       tg_user_id: user.id,
       tg_username: user.username || null,
     });
 
-    // Добавляем победителя
+    // Записываем победителя
     await sb.from("winners").insert({
       raffle_id: raffleId,
       tg_user_id: user.id,
@@ -169,16 +143,40 @@ bot.action(/join_(.+)/, async (ctx) => {
       { parse_mode: "HTML" }
     );
 
+    // Закрываем дроп, если добрали нужное число победителей
     const { data: allWinners } = await sb
       .from("winners")
       .select("id")
       .eq("raffle_id", raffleId);
 
     if (allWinners.length >= raffle.winners_count) {
-      await sb
-        .from("raffles")
-        .update({ is_finished: true })
-        .eq("id", raffleId);
+      await sb.from("raffles").update({ is_finished: true }).eq("id", raffleId);
 
       if (process.env.CHAT_ID) {
-        await bot.telegram.sendMessage
+        await bot.telegram.sendMessage(
+          process.env.CHAT_ID,
+          `🎯 Дроп <b>${raffle.title}</b> завершён!\nПобедителей: ${raffle.winners_count}`,
+          { parse_mode: "HTML" }
+        );
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    await ctx.answerCbQuery("Ошибка 😔");
+  }
+});
+
+// Vercel webhook handler
+export default async function handler(req, res) {
+  try {
+    const secret = req.query.secret;
+    if (secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ ok: false });
+    }
+    await bot.handleUpdate(req.body);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("Bot error:", e);
+    return res.status(200).json({ ok: true });
+  }
+}
