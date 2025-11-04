@@ -114,3 +114,36 @@ bot.hears('🎯 Рафл', async (ctx) => {
     }
   });
 });
+// Когда человек нажимает "Участвовать"
+bot.on('callback_query', async (ctx) => {
+  const data = ctx.callbackQuery.data;
+
+  if (data.startsWith('join_')) {
+    const raffleId = data.replace('join_', '');
+    const user = ctx.from;
+
+    await sb.from('users').upsert({
+      tg_user_id: user.id,
+      username: user.username || null,
+      first_name: user.first_name || null,
+      last_name: user.last_name || null
+    });
+
+    const { error } = await sb.from('entries').insert({
+      raffle_id: raffleId,
+      tg_user_id: user.id,
+      tg_username: user.username || null
+    });
+
+    if (error && error.code === '23505') {
+      return ctx.answerCbQuery('Ты уже участвуешь! 🎟️');
+    }
+
+    if (error) {
+      console.error(error);
+      return ctx.answerCbQuery('Ошибка 😢');
+    }
+
+    return ctx.answerCbQuery('Ты участвуешь в раффле! 🎉');
+  }
+});
