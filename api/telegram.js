@@ -89,3 +89,28 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true }); // отвечаем 200, чтобы Телеграм не спамил ретраями
   }
 }
+// Показывает активный рафл
+bot.hears('🎯 Рафл', async (ctx) => {
+  const { data: raffles } = await sb
+    .from('raffles')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (!raffles || raffles.length === 0) {
+    return ctx.reply('Сейчас активных раффлов нет. 💤');
+  }
+
+  const r = raffles[0];
+  const text = `🎯 <b>${r.title}</b>\n\n${r.description}\n\n🕒 До ${new Date(r.ends_at).toLocaleString()}`;
+
+  return ctx.replyWithPhoto(r.image_url, {
+    caption: text,
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🫡 Участвовать', callback_data: `join_${r.id}` }]
+      ]
+    }
+  });
+});
