@@ -165,3 +165,14 @@ bot.hears('🎯 Рафл', async (ctx) => {
 
   return ctx.reply(text, { parse_mode: 'HTML', ...button });
 });
+bot.action(/join_(.+)/, async (ctx) => {
+  const raffleId = ctx.match[1];
+  const user = ctx.from;
+  await sb.from('entries').upsert({
+    raffle_id: raffleId,
+    tg_user_id: user.id,
+    tg_username: user.username || null
+  });
+  await ctx.answerCbQuery('Ты успешно участвуешь!');
+  await ctx.reply('✅ Ты добавлен в участников!');
+});
