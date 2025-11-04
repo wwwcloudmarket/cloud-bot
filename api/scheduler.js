@@ -7,52 +7,39 @@ export default async function handler(req, res) {
   try {
     const now = new Date().toISOString();
 
-    // Получаем все дропы, которые пора выложить
-    const { data: raffles, error } = await sb
+    const { data: raffles } = await sb
       .from("raffles")
       .select("*")
       .eq("status", "scheduled")
       .lte("starts_at", now);
 
-    if (error) throw error;
-
-    if (!raffles || raffles.length === 0) {
-      return res.json({ ok: true, message: "Нет новых дропов для публикации." });
-    }
+    if (!raffles || raffles.length === 0)
+      return res.json({ ok: true, message: "Нет новых дропов" });
 
     for (const r of raffles) {
-      // Отправляем сообщение в чат
+      const caption = `🎯 <b>${r.title}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
+
       if (r.image_url) {
-  await bot.telegram.sendPhoto(
-    process.env.CHAT_ID,
-    r.image_url,
-    {
-      caption: `🎯 <b>${r.title}</b>\nКто первый нажмёт — тот победит 🏆`,
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
-        ],
-      },
-    }
-  );
-} else {
-  await bot.telegram.sendMessage(
-    process.env.CHAT_ID,
-    `🎯 <b>${r.title}</b>\nКто первый нажмёт — тот победит 🏆`,
-    {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
-        ],
-      },
-    }
-  );
-}
+        await bot.telegram.sendPhoto(process.env.CHAT_ID, r.image_url, {
+          caption,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
+            ],
+          },
+        });
+      } else {
+        await bot.telegram.sendMessage(process.env.CHAT_ID, caption, {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
+            ],
+          },
+        });
+      }
 
-
-      // Обновляем статус дропа
       await sb
         .from("raffles")
         .update({ status: "active" })
@@ -61,7 +48,7 @@ export default async function handler(req, res) {
 
     return res.json({ ok: true, sent: raffles.length });
   } catch (e) {
-    console.error("Scheduler error:", e.message);
+    console.error("Scheduler error:", e);
     return res.status(500).json({ ok: false, error: e.message });
   }
 }
