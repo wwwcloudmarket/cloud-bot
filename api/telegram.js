@@ -91,7 +91,15 @@ bot.hears("🎯 Рафлы", async (ctx) => {
     const button = Markup.inlineKeyboard([
       [Markup.button.callback("🪩 Участвовать", `join_${r.id}`)],
     ]);
-    await ctx.reply(text, { parse_mode: "HTML", ...button });
+    if (r.image_url) {
+  await ctx.replyWithPhoto(r.image_url, {
+    caption: text,
+    parse_mode: "HTML",
+    ...button,
+  });
+} else {
+  await ctx.reply(text, { parse_mode: "HTML", ...button });
+}
   }
 });
 
