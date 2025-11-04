@@ -1,17 +1,14 @@
 import { Telegraf, Markup } from 'telegraf';
 import { sb } from '../lib/db.js';
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_long_random';
+const bot = new Telegraf(process.env.BOT_TOKEN, {
+  telegram: { webhookReply: true },
+});
 
-if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required');
-
-const bot = new Telegraf(BOT_TOKEN, { telegram: { webhookReply: true } });
-
-function menu() {
+function mainMenu() {
   return Markup.keyboard([
-    ['👤 Мой профиль', '🎯 Рафл'],
-    ['🎟 Мои рафлы', '⚙️ Настройки']
+    ['👤 Мой профиль', '🎯 Рафлы'],
+    ['⚙️ Настройки']
   ]).resize();
 }
 
@@ -27,152 +24,98 @@ async function saveUser(ctx) {
   });
 }
 
+// Команда /start
 bot.start(async (ctx) => {
   await saveUser(ctx);
-  await ctx.reply('Добро пожаловать в личный кабинет!', menu());
-  await ctx.reply('Выбери пункт ниже 👇');
+  return ctx.reply(
+    'Добро пожаловать в Cloud Market 🎯\nВыбери пункт меню ниже:',
+    mainMenu()
+  );
 });
 
+// Мой профиль
 bot.hears('👤 Мой профиль', async (ctx) => {
   await saveUser(ctx);
   const id = ctx.from.id;
-  const { data: user } = await sb.from('users').select('*').eq('tg_user_id', id).single();
-  const lines = [
-    `ID: ${user.tg_user_id}`,
-    `Username: ${user.username || '—'}`,
-    `Имя: ${user.first_name || '—'} ${user.last_name || ''}`.trim(),
-    `Язык: ${user.lang_code || '—'}`,
-    `Создан: ${new Date(user.created_at).toLocaleString()}`
-  ];
-  return ctx.reply(`📇 Профиль\n${lines.join('\n')}`, menu());
-});
 
-bot.hears('🎟 Мои рафлы', async (ctx) => {
-  await saveUser(ctx);
-  const id = ctx.from.id;
-  const { data: entries } = await sb
-    .from('entries')
+  const { data: user } = await sb.from('users')
+    .select('*')
+    .eq('tg_user_id', id)
+    .single();
+
+  const { data: entries } = await sb.from('entries')
     .select('raffle_id, created_at')
     .eq('tg_user_id', id)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(5);
 
-  if (!entries || entries.length === 0) {
-    return ctx.reply('Пока пусто. Участвуй в Mini App — и тут появится история.', menu());
-  }
+  const text = [
+    `<b>👤 Профиль</b>`,
+    `ID: <code>${user.tg_user_id}</code>`,
+    `Имя: ${user.first_name || '—'}`,
+    `Username: @${user.username || '—'}`,
+    ``,
+    `<b>🎟 Последние участия:</b>`,
+    entries?.length
+      ? entries.map((e, i) => `${i + 1}. ${e.raffle_id.slice(0, 8)}... — ${new Date(e.created_at).toLocaleString()}`).join('\n')
+      : 'Нет участий'
+  ].join('\n');
 
-  const lines = entries.map((e, i) =>
-    `${i + 1}. ${e.raffle_id} — ${new Date(e.created_at).toLocaleString()}`
-  );
-  return ctx.reply(`История (последние 10):\n${lines.join('\n')}`, menu());
+  return ctx.reply(text, { parse_mode: 'HTML', ...mainMenu() });
 });
 
-bot.hears('⚙️ Настройки', async (ctx) => {
-  await saveUser(ctx);
-  return ctx.reply('Пока тут ничего. Скоро добавим уведомления о победах.', menu());
-});
-
-bot.on('message', async (ctx) => {
-  await saveUser(ctx);
-  return ctx.reply('Выбери пункт меню 👇', menu());
-});
-
-export default async function handler(req, res) {
-  const { secret } = req.query;
-  if (secret !== WEBHOOK_SECRET) return res.status(401).json({ ok: false });
-
-  try {
-    await bot.handleUpdate(req.body);
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    return res.status(200).json({ ok: true }); // отвечаем 200, чтобы Телеграм не спамил ретраями
-  }
-}
-// Показывает активный рафл
-bot.hears('🎯 Рафл', async (ctx) => {
-  const { data: raffles } = await sb
-    .from('raffles')
+// Кнопка "Рафлы" — показываем активные
+bot.hears('🎯 Рафлы', async (ctx) => {
+  const now = new Date().toISOString();
+  const { data: raffles } = await sb.from('raffles')
     .select('*')
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .gt('ends_at', now)
+    .order('starts_at', { ascending: true });
 
-  if (!raffles || raffles.length === 0) {
-    return ctx.reply('Сейчас активных раффлов нет. 💤');
+  if (!raffles || raffles.length === 0)
+    return ctx.reply('❌ Сейчас нет активных дропов.', mainMenu());
+
+  for (const r of raffles) {
+    const text = `🎯 <b>${r.title}</b>\n📅 ${new Date(r.ends_at).toLocaleString()}\nНаграды: ${r.winners_count}`;
+    const button = Markup.inlineKeyboard([
+      [Markup.button.callback('🪩 Участвовать', `join_${r.id}`)]
+    ]);
+    await ctx.reply(text, { parse_mode: 'HTML', ...button });
   }
-
-  const r = raffles[0];
-  const text = `🎯 <b>${r.title}</b>\n\n${r.description}\n\n🕒 До ${new Date(r.ends_at).toLocaleString()}`;
-
-  return ctx.replyWithPhoto(r.image_url, {
-    caption: text,
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🫡 Участвовать', callback_data: `join_${r.id}` }]
-      ]
-    }
-  });
 });
-// Когда человек нажимает "Участвовать"
-bot.on('callback_query', async (ctx) => {
-  const data = ctx.callbackQuery.data;
 
-  if (data.startsWith('join_')) {
-    const raffleId = data.replace('join_', '');
-    const user = ctx.from;
-
-    await sb.from('users').upsert({
-      tg_user_id: user.id,
-      username: user.username || null,
-      first_name: user.first_name || null,
-      last_name: user.last_name || null
-    });
-
-    const { error } = await sb.from('entries').insert({
+// Обработка участия
+bot.action(/join_(.+)/, async (ctx) => {
+  const raffleId = ctx.match[1];
+  const user = ctx.from;
+  try {
+    await sb.from('entries').upsert({
       raffle_id: raffleId,
       tg_user_id: user.id,
       tg_username: user.username || null
     });
-
-    if (error && error.code === '23505') {
-      return ctx.answerCbQuery('Ты уже участвуешь! 🎟️');
-    }
-
-    if (error) {
-      console.error(error);
-      return ctx.answerCbQuery('Ошибка 😢');
-    }
-
-    return ctx.answerCbQuery('Ты участвуешь в раффле! 🎉');
+    await ctx.answerCbQuery('✅ Ты участвуешь!');
+  } catch (e) {
+    await ctx.answerCbQuery('Ошибка участия 😔');
   }
 });
-bot.hears('🎯 Рафл', async (ctx) => {
-  const { data: raffle } = await sb
-    .from('raffles')
-    .select('*')
-    .eq('status', 'scheduled')
-    .order('starts_at', { ascending: true })
-    .limit(1)
-    .single();
 
-  if (!raffle) return ctx.reply('Пока нет активных раффлов.');
-
-  const text = `🎯 <b>${raffle.title}</b>\n\nНачало: ${new Date(raffle.starts_at).toLocaleString()}\nОкончание: ${new Date(raffle.ends_at).toLocaleString()}`;
-  const button = Markup.inlineKeyboard([
-    Markup.button.callback('🪩 Участвовать', `join_${raffle.id}`)
-  ]);
-
-  return ctx.reply(text, { parse_mode: 'HTML', ...button });
+// Настройки
+bot.hears('⚙️ Настройки', async (ctx) => {
+  return ctx.reply('Настройки пока простые:\n— язык: auto\n— уведомления: включены 🔔', mainMenu());
 });
-bot.action(/join_(.+)/, async (ctx) => {
-  const raffleId = ctx.match[1];
-  const user = ctx.from;
-  await sb.from('entries').upsert({
-    raffle_id: raffleId,
-    tg_user_id: user.id,
-    tg_username: user.username || null
-  });
-  await ctx.answerCbQuery('Ты успешно участвуешь!');
-  await ctx.reply('✅ Ты добавлен в участников!');
-});
+
+// Webhook обработчик для Vercel
+export default async function handler(req, res) {
+  try {
+    const secret = req.query.secret;
+    if (secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ ok: false });
+    }
+    await bot.handleUpdate(req.body);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('Bot error:', e);
+    return res.status(200).json({ ok: true });
+  }
+}
