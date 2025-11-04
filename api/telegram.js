@@ -12,7 +12,7 @@ function mainMenu() {
   ]).resize();
 }
 
-// 📍 сохраняем/обновляем пользователя
+// 📍 сохранить/обновить пользователя
 async function saveUser(ctx) {
   const u = ctx.from;
   if (!u) return;
@@ -25,7 +25,7 @@ async function saveUser(ctx) {
   });
 }
 
-// 🚀 команда /start
+// 🚀 старт
 bot.start(async (ctx) => {
   await saveUser(ctx);
   await ctx.reply(
@@ -34,7 +34,7 @@ bot.start(async (ctx) => {
   );
 });
 
-// 👤 мой профиль
+// 👤 профиль
 bot.hears("👤 Мой профиль", async (ctx) => {
   await saveUser(ctx);
   const id = ctx.from.id;
@@ -73,7 +73,7 @@ bot.hears("👤 Мой профиль", async (ctx) => {
   return ctx.reply(text, { parse_mode: "HTML", ...mainMenu() });
 });
 
-// 🎯 показать активные рафлы
+// 🎯 активные дропы
 bot.hears("🎯 Рафлы", async (ctx) => {
   const { data: raffles } = await sb
     .from("raffles")
@@ -85,21 +85,20 @@ bot.hears("🎯 Рафлы", async (ctx) => {
     return ctx.reply("❌ Сейчас нет активных дропов.", mainMenu());
 
   for (const r of raffles) {
-    const text = `🎯 <b>${r.title}</b>\n📅 Старт: ${new Date(
-      r.starts_at
-    ).toLocaleString()}\n\nКто первый нажмёт — тот победит 🏆`;
+    const text = `🎯 <b>${r.title}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
     const button = Markup.inlineKeyboard([
       [Markup.button.callback("🪩 Участвовать", `join_${r.id}`)],
     ]);
+
     if (r.image_url) {
-  await ctx.replyWithPhoto(r.image_url, {
-    caption: text,
-    parse_mode: "HTML",
-    ...button,
-  });
-} else {
-  await ctx.reply(text, { parse_mode: "HTML", ...button });
-}
+      await ctx.replyWithPhoto(r.image_url, {
+        caption: text,
+        parse_mode: "HTML",
+        ...button,
+      });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", ...button });
+    }
   }
 });
 
@@ -111,13 +110,12 @@ bot.hears("⚙️ Настройки", async (ctx) => {
   );
 });
 
-// 🪩 участие (кто первый — тот победил)
+// 🪩 участие
 bot.action(/join_(.+)/, async (ctx) => {
   const raffleId = ctx.match[1];
   const user = ctx.from;
 
   try {
-    // Получаем сам дроп
     const { data: raffle } = await sb
       .from("raffles")
       .select("*")
@@ -125,46 +123,34 @@ bot.action(/join_(.+)/, async (ctx) => {
       .single();
 
     if (!raffle) return ctx.answerCbQuery("Раффл не найден 😔");
-
-    // Если дроп уже закончен
     if (raffle.is_finished) {
-      await ctx.answerCbQuery("❌ Дроп уже завершён!");
-      return ctx.reply("Этот дроп уже закрыт, победители выбраны.");
+      await ctx.answerCbQuery("❌ Дроп завершён!");
+      return ctx.reply("❌ Дроп уже закрыт!");
     }
 
-    // Проверяем, сколько уже есть победителей
-    const { data: existingWinners } = await sb
+    // Проверяем победителей
+    const { data: existing } = await sb
       .from("winners")
       .select("*")
       .eq("raffle_id", raffleId);
+    const count = existing?.length || 0;
 
-    const winnersCount = existingWinners ? existingWinners.length : 0;
-
-    // Если лимит победителей достигнут
-    if (winnersCount >= raffle.winners_count) {
-      // закрываем дроп
-      await sb
-        .from("raffles")
-        .update({ is_finished: true })
-        .eq("id", raffleId);
-      await ctx.answerCbQuery("Все победители уже выбраны 😅");
-      return ctx.reply("❌ Дроп завершён, все победители определены!");
+    if (count >= raffle.winners_count) {
+      await sb.from("raffles").update({ is_finished: true }).eq("id", raffleId);
+      return ctx.answerCbQuery("Все победители уже выбраны 😅");
     }
 
-    // Проверяем, не участвовал ли пользователь ранее
-    const { data: prevEntry } = await sb
+    // Проверяем, участвовал ли пользователь
+    const { data: prev } = await sb
       .from("entries")
       .select("*")
       .eq("raffle_id", raffleId)
       .eq("tg_user_id", user.id)
       .single();
 
-    if (prevEntry) {
-      await ctx.answerCbQuery("Ты уже участвуешь 😎");
-      return;
-    }
+    if (prev) return ctx.answerCbQuery("Ты уже участвуешь 😎");
 
-    // Добавляем запись об участии
+    // Добавляем участие
     await sb.from("entries").insert({
       raffle_id: raffleId,
       tg_user_id: user.id,
@@ -177,13 +163,12 @@ bot.action(/join_(.+)/, async (ctx) => {
       tg_user_id: user.id,
     });
 
-    await ctx.answerCbQuery("🎉 Ты победил!");
+    await ctx.answerCbQuery("🎉 Ты выиграл!");
     await ctx.reply(
       `🏆 Поздравляем, ${user.first_name || "участник"}!\nТы стал победителем дропа <b>${raffle.title}</b> 🎯`,
       { parse_mode: "HTML" }
     );
 
-    // Проверяем — достигнут ли лимит после добавления
     const { data: allWinners } = await sb
       .from("winners")
       .select("id")
@@ -195,71 +180,5 @@ bot.action(/join_(.+)/, async (ctx) => {
         .update({ is_finished: true })
         .eq("id", raffleId);
 
-      // сообщение в чат
       if (process.env.CHAT_ID) {
-        await bot.telegram.sendMessage(
-          process.env.CHAT_ID,
-          `🎯 Дроп <b>${raffle.title}</b> завершён!\nПобедителей: ${raffle.winners_count}`,
-          { parse_mode: "HTML" }
-        );
-      }
-    }
-  } catch (e) {
-    console.error(e);
-    await ctx.answerCbQuery("Ошибка 😔");
-  }
-});
-
-
-    // Добавляем участника
-    await sb.from("entries").insert({
-      raffle_id: raffleId,
-      tg_user_id: user.id,
-      tg_username: user.username || null,
-    });
-
-    // Первый участник — победитель 🎯
-    await sb
-      .from("raffles")
-      .update({ winner_id: user.id, is_finished: true })
-      .eq("id", raffleId);
-
-    await sb.from("winners").insert({
-      raffle_id: raffleId,
-      tg_user_id: user.id,
-    });
-
-    await ctx.answerCbQuery("🎉 Ты выиграл!");
-    await ctx.reply(
-      `🏆 Поздравляем, ${user.first_name || "участник"}!\nТы выиграл в дропе <b>${raffle.title}</b> 🎯`,
-      { parse_mode: "HTML" }
-    );
-
-    // оповещение в канал (если есть CHAT_ID)
-    if (process.env.CHAT_ID) {
-      await bot.telegram.sendMessage(
-        process.env.CHAT_ID,
-        `🏆 Победитель дропа <b>${raffle.title}</b> — ${user.first_name || "участник"} (@${user.username || "no username"})`,
-        { parse_mode: "HTML" }
-      );
-    }
-  } catch (e) {
-    console.error(e);
-    await ctx.answerCbQuery("Ошибка 😔");
-  }
-});
-
-// webhook для Vercel
-export default async function handler(req, res) {
-  try {
-    const secret = req.query.secret;
-    if (secret !== process.env.WEBHOOK_SECRET)
-      return res.status(401).json({ ok: false });
-
-    await bot.handleUpdate(req.body);
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("Bot error:", e);
-    return res.status(200).json({ ok: true });
-  }
-}
+        await bot.telegram.sendMessage
