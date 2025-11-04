@@ -147,3 +147,21 @@ bot.on('callback_query', async (ctx) => {
     return ctx.answerCbQuery('Ты участвуешь в раффле! 🎉');
   }
 });
+bot.hears('🎯 Рафл', async (ctx) => {
+  const { data: raffle } = await sb
+    .from('raffles')
+    .select('*')
+    .eq('status', 'scheduled')
+    .order('starts_at', { ascending: true })
+    .limit(1)
+    .single();
+
+  if (!raffle) return ctx.reply('Пока нет активных раффлов.');
+
+  const text = `🎯 <b>${raffle.title}</b>\n\nНачало: ${new Date(raffle.starts_at).toLocaleString()}\nОкончание: ${new Date(raffle.ends_at).toLocaleString()}`;
+  const button = Markup.inlineKeyboard([
+    Markup.button.callback('🪩 Участвовать', `join_${raffle.id}`)
+  ]);
+
+  return ctx.reply(text, { parse_mode: 'HTML', ...button });
+});
