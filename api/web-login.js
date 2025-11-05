@@ -2,9 +2,6 @@
 import crypto from "node:crypto";
 import { sb } from "../lib/db.js";
 
-//
-// ————— 1. Проверка подписи от Telegram —————
-//
 function verifyTelegramInitData(data) {
   const { hash, ...rest } = data;
   const secret = crypto.createHash("sha256").update(process.env.BOT_TOKEN).digest();
@@ -16,9 +13,6 @@ function verifyTelegramInitData(data) {
   return hmac === hash;
 }
 
-//
-// ————— 2. Создание подписи для сессии (JWT-like) —————
-//
 function signSession(payload) {
   const json = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto
@@ -28,9 +22,6 @@ function signSession(payload) {
   return `${json}.${sig}`;
 }
 
-//
-// ————— 3. CORS helper (для вызова с Тильды) —————
-//
 function cors(res) {
   const origin = process.env.TILDA_ORIGIN || "https://wwwcloudmarket.ru";
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -38,39 +29,42 @@ function cors(res) {
   res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
-//
-// ————— 4. Основной handler —————
-//
 export default async function handler(req, res) {
   cors(res);
+
+  // Разрешаем preflight
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false });
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-    if (!body || !body.id || !body.hash)
+    // Telegram иногда присылает данные через GET, а иногда через POST
+    const data =
+      req.method === "POST"
+        ? typeof req.body === "string"
+          ? JSON.parse(req.body)
+          : req.body
+        : req.query;
+
+    if (!data || !data.id || !data.hash)
       return res.status(400).json({ ok: false, error: "bad payload" });
 
-    // — Проверяем подпись Telegram —
-    if (!verifyTelegramInitData(body)) {
+    if (!verifyTelegramInitData(data))
       return res.status(401).json({ ok: false, error: "invalid signature" });
-    }
 
-    // — Сохраняем / обновляем пользователя в Supabase —
+    // сохраняем / обновляем пользователя
     await sb.from("users").upsert({
-      tg_user_id: body.id,
-      username: body.username || null,
-      first_name: body.first_name || null,
-      last_name: body.last_name || null,
-      photo_url: body.photo_url || null,
-      lang_code: body.language_code || null,
+      tg_user_id: data.id,
+      username: data.username || null,
+      first_name: data.first_name || null,
+      last_name: data.last_name || null,
+      photo_url: data.photo_url || null,
+      lang_code: data.language_code || null,
     });
 
-    // — Формируем cookie-сессию —
+    // создаём cookie
     const cookieVal = signSession({
-      uid: body.id,
-      username: body.username || null,
-      first_name: body.first_name || null,
+      uid: data.id,
+      username: data.username || null,
+      first_name: data.first_name || null,
     });
 
     res.setHeader(
@@ -78,12 +72,13 @@ export default async function handler(req, res) {
       `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; Secure`
     );
 
-    // — После успешного входа: редирект на ЛК (страница Тильды) —
-    return res.redirect(302, "https://wwwcloudmarket.ru/lk");
+    // редирект на страницу личного кабинета на Тильде
+    res.writeHead(302, { Location: "https://wwwcloudmarket.ru/lk" });
+    res.end();
 
   } catch (e) {
     console.error("web-login error:", e);
-    return res.status(500).json({ ok: false, error: "server error" });
+    res.status(500).json({ ok: false, error: "server error" });
   }
 }
 
