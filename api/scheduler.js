@@ -36,7 +36,7 @@ export default async function handler(req, res) {
     const { data: users, error: usersError } = await sb
       .from("users")
       .select("tg_user_id")
-      .is("is_active", null) // либо активные по умолчанию
+      .is("is_active", true) // либо активные по умолчанию
       .not("tg_user_id", "is", null);
 
     if (usersError) throw usersError;
