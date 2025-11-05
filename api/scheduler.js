@@ -5,18 +5,19 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 export default async function handler(req, res) {
   try {
+    // 1️⃣ Проверка секрета
     const secret = req.query.secret;
     if (secret !== process.env.WEBHOOK_SECRET) {
       return res.status(401).json({ ok: false, error: "Invalid secret" });
     }
 
-    // === 🕒 Исправляем время на локальное (МСК) ===
+    // 2️⃣ Вычисляем московское время
     const now = new Date();
-    const offsetMinutes = now.getTimezoneOffset(); // в минутах (для Москвы: -180)
+    const offsetMinutes = now.getTimezoneOffset(); // в минутах (для Москвы -180)
     const nowLocal = new Date(now.getTime() - offsetMinutes * 60 * 1000).toISOString();
     console.log("⏰ Local time:", nowLocal);
 
-    // === 🧩 Проверяем дропы по локальному времени ===
+    // 3️⃣ Ищем новые дропы
     const { data: raffles, error } = await sb
       .from("raffles")
       .select("*")
@@ -31,41 +32,78 @@ export default async function handler(req, res) {
 
     console.log(`🎁 Найдено ${raffles.length} новых дропов`);
 
-    for (const r of raffles) {
-      const caption = `🎯 <b>${r.title}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
+    // 4️⃣ Получаем всех активных пользователей
+    const { data: users, error: usersError } = await sb
+      .from("users")
+      .select("tg_user_id")
+      .is("is_active", null) // либо активные по умолчанию
+      .not("tg_user_id", "is", null);
 
-      try {
-        if (r.image_url) {
-          await bot.telegram.sendPhoto(process.env.CHAT_ID, r.image_url, {
-            caption,
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
-              ],
-            },
-          });
-        } else {
-          await bot.telegram.sendMessage(process.env.CHAT_ID, caption, {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "🪩 Участвовать", callback_data: `join_${r.id}` }],
-              ],
-            },
-          });
-        }
-
-        await sb.from("raffles").update({ status: "active" }).eq("id", r.id);
-        console.log(`✅ Рафл "${r.title}" отправлен`);
-      } catch (e) {
-        console.error("❌ Ошибка при отправке:", e.message);
-      }
+    if (usersError) throw usersError;
+    if (!users?.length) {
+      console.log("⚠️ Нет пользователей для рассылки");
+      return res.json({ ok: false, error: "No users" });
     }
 
-    res.json({ ok: true, sent: raffles.length });
+    console.log(`👥 Пользователей для рассылки: ${users.length}`);
+
+    // 5️⃣ Перебираем каждый раффл
+    for (const raffle of raffles) {
+      const caption = `🎯 <b>${raffle.title}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${raffle.winners_count}`;
+
+      // 6️⃣ Отправляем каждому пользователю
+      for (const user of users) {
+        try {
+          if (raffle.image_url) {
+            await bot.telegram.sendPhoto(user.tg_user_id, raffle.image_url, {
+              caption,
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "🪩 Участвовать", callback_data: `join_${raffle.id}` }],
+                ],
+              },
+            });
+          } else {
+            await bot.telegram.sendMessage(user.tg_user_id, caption, {
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "🪩 Участвовать", callback_data: `join_${raffle.id}` }],
+                ],
+              },
+            });
+          }
+
+          console.log(`📨 Отправлено пользователю ${user.tg_user_id}`);
+        } catch (e) {
+          console.error(`❌ Ошибка при отправке пользователю ${user.tg_user_id}:`, e.message);
+
+          // если пользователь заблокировал бота — помечаем его неактивным
+          if (e.message.includes("bot was blocked") || e.message.includes("user is deactivated")) {
+            await sb
+              .from("users")
+              .update({ is_active: false })
+              .eq("tg_user_id", user.tg_user_id);
+          }
+        }
+
+        // 🔹 защита от flood limit Telegram
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      // 7️⃣ Обновляем статус раффла
+      await sb.from("raffles").update({ status: "active" }).eq("id", raffle.id);
+      console.log(`✅ Рафл "${raffle.title}" теперь активен`);
+    }
+
+    return res.json({
+      ok: true,
+      sent_raffles: raffles.length,
+      sent_users: users.length,
+    });
   } catch (e) {
     console.error("Scheduler error:", e);
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 }
