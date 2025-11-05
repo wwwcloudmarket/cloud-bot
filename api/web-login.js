@@ -2,10 +2,12 @@
 import crypto from "node:crypto";
 import { sb } from "../lib/db.js";
 
+//
+// ————— 1. Проверка подписи от Telegram —————
+//
 function verifyTelegramInitData(data) {
-  // data — объект с полями от Telegram Login Widget
   const { hash, ...rest } = data;
-  const secret = crypto.createHash("sha256").update(process.env.BOT_TOKEN).digest(); // key = sha256(BOT_TOKEN)
+  const secret = crypto.createHash("sha256").update(process.env.BOT_TOKEN).digest();
   const checkString = Object.keys(rest)
     .sort()
     .map((k) => `${k}=${rest[k]}`)
@@ -14,26 +16,31 @@ function verifyTelegramInitData(data) {
   return hmac === hash;
 }
 
+//
+// ————— 2. Создание подписи для сессии (JWT-like) —————
+//
 function signSession(payload) {
   const json = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto.createHmac("sha256", process.env.WEB_JWT_SECRET).update(json).digest("base64url");
+  const sig = crypto
+    .createHmac("sha256", process.env.WEB_JWT_SECRET)
+    .update(json)
+    .digest("base64url");
   return `${json}.${sig}`;
 }
-function verifySession(cookieVal) {
-  if (!cookieVal) return null;
-  const [json, sig] = cookieVal.split(".");
-  const check = crypto.createHmac("sha256", process.env.WEB_JWT_SECRET).update(json).digest("base64url");
-  if (sig !== check) return null;
-  try { return JSON.parse(Buffer.from(json, "base64url").toString()); } catch { return null; }
-}
 
+//
+// ————— 3. CORS helper (для вызова с Тильды) —————
+//
 function cors(res) {
-  const origin = process.env.TILDA_ORIGIN || "*";
+  const origin = process.env.TILDA_ORIGIN || "https://wwwcloudmarket.ru";
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
+//
+// ————— 4. Основной handler —————
+//
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -41,31 +48,39 @@ export default async function handler(req, res) {
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-    if (!body || !body.id || !body.hash) return res.status(400).json({ ok: false, error: "bad payload" });
+    if (!body || !body.id || !body.hash)
+      return res.status(400).json({ ok: false, error: "bad payload" });
 
+    // — Проверяем подпись Telegram —
     if (!verifyTelegramInitData(body)) {
       return res.status(401).json({ ok: false, error: "invalid signature" });
     }
 
-    // upsert пользователя
+    // — Сохраняем / обновляем пользователя в Supabase —
     await sb.from("users").upsert({
       tg_user_id: body.id,
       username: body.username || null,
       first_name: body.first_name || null,
       last_name: body.last_name || null,
+      photo_url: body.photo_url || null,
       lang_code: body.language_code || null,
     });
 
-    // устанавливаем куку сессии (1 месяц)
-    const cookieVal = signSession({ uid: body.id, u: body.username || null });
-    const isSecure = true;
+    // — Формируем cookie-сессию —
+    const cookieVal = signSession({
+      uid: body.id,
+      username: body.username || null,
+      first_name: body.first_name || null,
+    });
+
     res.setHeader(
       "Set-Cookie",
-      `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; ${isSecure ? "Secure" : ""}`
+      `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; Secure`
     );
 
-    // 🔹 Перенаправляем на страницу личного кабинета
-return res.redirect(302, "https://wwwcloudmarket.ru/lk");
+    // — После успешного входа: редирект на ЛК (страница Тильды) —
+    return res.redirect(302, "https://wwwcloudmarket.ru/lk");
+
   } catch (e) {
     console.error("web-login error:", e);
     return res.status(500).json({ ok: false, error: "server error" });
