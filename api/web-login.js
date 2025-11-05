@@ -64,7 +64,8 @@ export default async function handler(req, res) {
       `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; ${isSecure ? "Secure" : ""}`
     );
 
-    return res.json({ ok: true });
+    // 🔹 Перенаправляем на страницу личного кабинета
+return res.redirect(302, "https://wwwcloudmarket.ru/lk");
   } catch (e) {
     console.error("web-login error:", e);
     return res.status(500).json({ ok: false, error: "server error" });
