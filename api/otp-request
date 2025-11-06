@@ -2,11 +2,18 @@ import { sb } from "../lib/db.js";
 import { Telegraf } from "telegraf";
 import { normalizePhone, randomCode6, hashCode } from "../lib/util.js";
 
+// --- добавь в начало функции ---
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+}
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") return res.status(405).json({ ok: false });
+  cors(res);
+  if (req.method === "OPTIONS") return res.status(204).end(); // preflight
 
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const p = normalizePhone(body?.phone || "");
