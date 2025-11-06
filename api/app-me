@@ -1,0 +1,28 @@
+import { sb } from "../lib/db.js";
+import { verifyAppToken } from "../lib/util.js";
+
+export default async function handler(req, res) {
+  try {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const sess = token ? verifyAppToken(token) : null;
+    if (!sess?.uid) return res.status(401).json({ ok: false });
+
+    const { data: user } = await sb
+      .from("users")
+      .select("tg_user_id, username, first_name, last_name, photo_url, phone")
+      .eq("tg_user_id", sess.uid)
+      .single();
+
+    const { data: wins } = await sb
+      .from("winners")
+      .select("raffle_id, decided_at, access_token")
+      .eq("tg_user_id", sess.uid)
+      .order("decided_at", { ascending: false });
+
+    return res.json({ ok: true, user: { ...user, wins } });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false });
+  }
+}
