@@ -1,0 +1,49 @@
+import { sb } from "../lib/db.js";
+import { normalizePhone, hashCode, signAppToken } from "../lib/util.js";
+
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") return res.status(405).json({ ok: false });
+
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    const p = normalizePhone(body?.phone || "");
+    const code = (body?.code || "").trim();
+    if (!p || !code) return res.status(400).json({ ok: false, error: "phone_or_code_missing" });
+
+    const { data: record, error: rerr } = await sb
+      .from("otp_codes")
+      .select("*")
+      .eq("phone", p.toLowerCase())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (rerr) throw rerr;
+
+    if (!record) return res.status(400).json({ ok: false, error: "code_not_found" });
+    if (new Date(record.expires_at) < new Date())
+      return res.status(400).json({ ok: false, error: "code_expired" });
+    if (record.code_hash !== hashCode(code)) {
+      await sb.from("otp_codes").update({ attempts: (record.attempts || 0) + 1 }).eq("id", record.id);
+      return res.status(400).json({ ok: false, error: "code_invalid" });
+    }
+
+    const { data: user, error: uerr } = await sb
+      .from("users")
+      .select("tg_user_id, username, first_name, last_name, photo_url, phone")
+      .eq("phone", p)
+      .maybeSingle();
+    if (uerr) throw uerr;
+    if (!user) return res.status(404).json({ ok: false, error: "user_not_found" });
+
+    const token = signAppToken({
+      uid: user.tg_user_id,
+      phone: user.phone,
+      iat: Math.floor(Date.now() / 1000),
+    });
+
+    return res.json({ ok: true, app_token: token, user });
+  } catch (e) {
+    console.error("otp-verify error:", e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+}
