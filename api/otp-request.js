@@ -1,10 +1,10 @@
+// api/otp-request.js
 import { sb } from "../lib/db.js";
 import { Telegraf } from "telegraf";
 import { normalizePhone, randomCode6, hashCode } from "../lib/util.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// --- CORS для iOS / Safari ---
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -14,19 +14,17 @@ function cors(res) {
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-
-  if (req.method !== "POST")
-    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const p = normalizePhone(body?.phone || "");
     if (!p) return res.status(400).json({ ok: false, error: "phone_required" });
 
-    // ищем пользователя по телефону
+    // ищем пользователя по телефону (должен быть сохранён ботом ранее)
     const { data: user } = await sb
       .from("users")
-      .select("tg_user_id, first_name, username, phone")
+      .select("tg_user_id, first_name, username")
       .eq("phone", p)
       .maybeSingle();
 
@@ -34,7 +32,6 @@ export default async function handler(req, res) {
       return res.status(404).json({ ok: false, error: "phone_not_found" });
     }
 
-    // генерим код и сохраняем
     const code = randomCode6();
     const expires = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
@@ -44,7 +41,6 @@ export default async function handler(req, res) {
       expires_at: expires,
     });
 
-    // отправляем код в Telegram
     await bot.telegram.sendMessage(
       user.tg_user_id,
       `🔐 Код для входа в Cloud Market: <b>${code}</b>\nДействует 5 минут.`,
