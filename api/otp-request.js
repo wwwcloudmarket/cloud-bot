@@ -1,6 +1,7 @@
 // api/otp-request.js
-import { sb } from "../lib/db.js";          // твой уже настроенный Supabase клиент
+import { sb } from "../lib/db.js";
 import { normalizePhone } from "../lib/phone.js";
+import crypto from "crypto";
 
 function cors(res) {
   const origin = process.env.TILDA_ORIGIN || "*";
@@ -12,35 +13,35 @@ function cors(res) {
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST")    return res.status(405).json({ ok: false, error: "method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ ok: false, error: "method not allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const phoneRaw = (body?.phone || "").trim();
     const phoneNorm = normalizePhone(phoneRaw);
-    if (!phoneNorm) return res.status(400).json({ ok: false, error: "invalid phone" });
+    if (!phoneNorm)
+      return res.status(400).json({ ok: false, error: "invalid phone" });
 
-    // генерим код: 4–6 цифр (здесь 4)
+    // генерируем 4-значный код
     const code = String(Math.floor(1000 + Math.random() * 9000));
+    const code_hash = crypto.createHash("sha256").update(code).digest("hex");
 
-    // сохраняем
-    const { error: insErr } = await sb
-      .from("otp_codes")
-      .insert({
-        phone_raw: phoneRaw,
-        phone_norm: phoneNorm,
-        code,
-      });
+    // сохраняем код в БД
+    const { error: insErr } = await sb.from("otp_codes").insert({
+      phone_raw: phoneRaw,
+      phone_norm: phoneNorm,
+      code_hash,
+    });
 
     if (insErr) {
       console.error("otp-request insert error:", insErr);
       return res.status(500).json({ ok: false, error: "db error" });
     }
 
-    // TODO: отправка кода через твоего Telegram-бота
-    // await sendViaTelegram(phoneNorm, code)
+    // тут можно отправить код через Telegram или SMS
+    console.log(`✅ OTP sent to ${phoneNorm}: ${code}`);
 
-    console.log(`OTP sent to ${phoneNorm}: ${code}`);
     return res.json({ ok: true });
   } catch (e) {
     console.error("otp-request error:", e);
