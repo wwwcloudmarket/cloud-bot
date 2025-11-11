@@ -1,76 +1,91 @@
 // api/otp-verify.js
 import { sb } from "../lib/db.js";
-import crypto from "node:crypto";
-import { normalizePhone, hashCode } from "../lib/util.js";
+import { normalizePhone } from "../lib/phone.js";
 
 function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  const origin = process.env.TILDA_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
-function signSession(payload) {
-  const json = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto
-    .createHmac("sha256", process.env.WEB_JWT_SECRET)
-    .update(json)
-    .digest("base64url");
-  return `${json}.${sig}`;
-}
+// срок действия кода (в минутах)
+const OTP_TTL_MIN = 10;
 
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
+  if (req.method !== "POST")    return res.status(405).json({ ok: false, error: "method not allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-    const phone = normalizePhone(body?.phone || "");
-    const code = String(body?.code || "").trim();
-    if (!phone || !code) return res.status(400).json({ ok: false, error: "missing_fields" });
+    const phoneRaw = (body?.phone || "").trim();
+    const code     = (body?.code || "").trim();
 
-    // берём ПОСЛЕДНИЙ код по номеру
-    const { data: otp, error: otpErr } = await sb
+    const phoneNorm = normalizePhone(phoneRaw);
+    if (!phoneNorm || !code) return res.status(400).json({ ok: false, error: "invalid payload" });
+
+    // берём последний неиспользованный код по номеру
+    const { data: rows, error: selErr } = await sb
       .from("otp_codes")
-      .select("code_hash, expires_at, created_at")
-      .eq("phone", phone.toLowerCase())
+      .select("id, code, created_at, used")
+      .eq("phone_norm", phoneNorm)
+      .eq("used", false)
       .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .limit(1);
 
-    if (otpErr) throw otpErr;
-    if (!otp) return res.json({ ok: false, error: "code_not_found" });
-
-    // сверяем по хэшу
-    if (otp.code_hash !== hashCode(code)) {
-      return res.json({ ok: false, error: "wrong_code" });
+    if (selErr) {
+      console.error("otp-verify select error:", selErr);
+      return res.status(500).json({ ok: false, error: "db error" });
     }
 
-    // проверяем срок действия
-    if (new Date(otp.expires_at) < new Date()) {
-      return res.json({ ok: false, error: "code_expired" });
+    const row = rows?.[0];
+    if (!row) {
+      return res.status(400).json({ ok: false, error: "code not found" });
     }
 
-    // находим пользователя по телефону
-    const { data: user } = await sb
-      .from("users")
-      .select("tg_user_id, first_name, username, phone, photo_url")
-      .eq("phone", phone)
-      .maybeSingle();
-
-    if (!user?.tg_user_id) {
-      return res.json({ ok: false, error: "user_not_found" });
+    // сверяем код
+    if (row.code !== code) {
+      return res.status(400).json({ ok: false, error: "wrong code" });
     }
 
-    // подписываем токен для приложения (можно класть в Keychain)
-    const appToken = signSession({ uid: user.tg_user_id, u: user.username || null });
+    // проверяем TTL
+    const created = new Date(row.created_at).getTime();
+    const ageMin = (Date.now() - created) / 60000;
+    if (ageMin > OTP_TTL_MIN) {
+      return res.status(400).json({ ok: false, error: "code expired" });
+    }
 
-    // по желанию: одноразовый код можно удалить
-    await sb.from("otp_codes").delete().eq("phone", phone.toLowerCase());
+    // помечаем как использованный
+    const { error: updErr } = await sb
+      .from("otp_codes")
+      .update({ used: true })
+      .eq("id", row.id);
 
-    return res.json({ ok: true, app_token: appToken, user });
+    if (updErr) {
+      console.error("otp-verify update error:", updErr);
+      // не падаем на клиент, но логируем
+    }
+
+    // ищем профиль по телефону (подстрой имя таблицы/поля под свою схему)
+    const { data: users } = await sb
+      .from("users") // или "profiles"
+      .select("tg_user_id, first_name, last_name, username, phone, photo_url")
+      .eq("phone", phoneNorm)
+      .limit(1);
+
+    const user = users?.[0] || null;
+
+    // Возвращаем формат, который ждёт твой iOS (VerifyResponse)
+    return res.json({
+      ok: true,
+      app_token: null, // если делаешь куки-сессию — можно вернуть токен
+      user,            // null, если пользователя нет в БД
+    });
   } catch (e) {
     console.error("otp-verify error:", e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: "server error" });
   }
 }
+
+export const config = { api: { bodyParser: true } };
