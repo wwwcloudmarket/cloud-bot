@@ -1,55 +1,51 @@
 // api/otp-request.js
-import { sb } from "../lib/db.js";
-import { Telegraf } from "telegraf";
-import { normalizePhone, randomCode6, hashCode } from "../lib/util.js";
-
-const bot = new Telegraf(process.env.BOT_TOKEN);
+import { sb } from "../lib/db.js";          // твой уже настроенный Supabase клиент
+import { normalizePhone } from "../lib/phone.js";
 
 function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  const origin = process.env.TILDA_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method_not_allowed" });
+  if (req.method !== "POST")    return res.status(405).json({ ok: false, error: "method not allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-    const p = normalizePhone(body?.phone || "");
-    if (!p) return res.status(400).json({ ok: false, error: "phone_required" });
+    const phoneRaw = (body?.phone || "").trim();
+    const phoneNorm = normalizePhone(phoneRaw);
+    if (!phoneNorm) return res.status(400).json({ ok: false, error: "invalid phone" });
 
-    // ищем пользователя по телефону (должен быть сохранён ботом ранее)
-    const { data: user } = await sb
-      .from("users")
-      .select("tg_user_id, first_name, username")
-      .eq("phone", p)
-      .maybeSingle();
+    // генерим код: 4–6 цифр (здесь 4)
+    const code = String(Math.floor(1000 + Math.random() * 9000));
 
-    if (!user?.tg_user_id) {
-      return res.status(404).json({ ok: false, error: "phone_not_found" });
+    // сохраняем
+    const { error: insErr } = await sb
+      .from("otp_codes")
+      .insert({
+        phone_raw: phoneRaw,
+        phone_norm: phoneNorm,
+        code,
+      });
+
+    if (insErr) {
+      console.error("otp-request insert error:", insErr);
+      return res.status(500).json({ ok: false, error: "db error" });
     }
 
-    const code = randomCode6();
-    const expires = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    // TODO: отправка кода через твоего Telegram-бота
+    // await sendViaTelegram(phoneNorm, code)
 
-    await sb.from("otp_codes").insert({
-      phone: p.toLowerCase(),
-      code_hash: hashCode(code),
-      expires_at: expires,
-    });
-
-    await bot.telegram.sendMessage(
-      user.tg_user_id,
-      `🔐 Код для входа в Cloud Market: <b>${code}</b>\nДействует 5 минут.`,
-      { parse_mode: "HTML" }
-    );
-
-    return res.json({ ok: true, sent: true });
+    console.log(`OTP sent to ${phoneNorm}: ${code}`);
+    return res.json({ ok: true });
   } catch (e) {
     console.error("otp-request error:", e);
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: "server error" });
   }
 }
+
+export const config = { api: { bodyParser: true } };
