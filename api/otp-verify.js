@@ -1,7 +1,15 @@
 // api/otp-verify.js
 import { sb } from "../lib/db.js";
-import { normalizePhone } from "../lib/phone.js";
-import crypto from "crypto";
+import crypto from "node:crypto";
+
+function normalizePhone(raw) {
+  if (!raw) return null;
+  let digits = String(raw).replace(/\D+/g, "");
+  if (digits.startsWith("8") && digits.length === 11) digits = "7" + digits.slice(1);
+  if (digits.length === 10) digits = "7" + digits;
+  if (!digits.startsWith("7")) digits = "7" + digits;
+  return "+" + digits;
+}
 
 function cors(res) {
   const origin = process.env.TILDA_ORIGIN || "*";
@@ -10,33 +18,27 @@ function cors(res) {
   res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
-// срок жизни OTP (в минутах)
-const OTP_TTL_MIN = 10;
-
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST")
-    return res.status(405).json({ ok: false, error: "method not allowed" });
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method not allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const phoneRaw = (body?.phone || "").trim();
     const code = (body?.code || "").trim();
-
     const phoneNorm = normalizePhone(phoneRaw);
-    if (!phoneNorm || !code)
-      return res.status(400).json({ ok: false, error: "invalid payload" });
+    if (!phoneNorm || !code) return res.status(400).json({ ok: false, error: "invalid payload" });
 
-    const hash = crypto.createHash("sha256").update(code).digest("hex");
+    const codeHash = crypto.createHash("sha256").update(code).digest("hex");
 
-    // выбираем последний неиспользованный код по номеру
+    // 1️⃣ Находим последний активный код
     const { data: rows, error: selErr } = await sb
       .from("otp_codes")
-      .select("id, code_hash, created_at, used")
-      .eq("phone_norm", phoneNorm)
+      .select("id, code_hash, expires_at, used")
+      .eq("phone", phoneNorm)
       .eq("used", false)
-      .order("created_at", { ascending: false })
+      .order("expires_at", { ascending: false })
       .limit(1);
 
     if (selErr) {
@@ -47,38 +49,31 @@ export default async function handler(req, res) {
     const row = rows?.[0];
     if (!row) return res.status(400).json({ ok: false, error: "code not found" });
 
-    // сравниваем хеши
-    if (row.code_hash !== hash)
-      return res.status(400).json({ ok: false, error: "wrong code" });
-
-    // проверяем TTL
-    const created = new Date(row.created_at).getTime();
-    const ageMin = (Date.now() - created) / 60000;
-    if (ageMin > OTP_TTL_MIN)
+    // 2️⃣ Проверяем срок и совпадение
+    if (new Date(row.expires_at) < new Date()) {
       return res.status(400).json({ ok: false, error: "code expired" });
+    }
 
-    // помечаем как использованный
+    if (row.code_hash !== codeHash) {
+      return res.status(400).json({ ok: false, error: "wrong code" });
+    }
+
+    // 3️⃣ Помечаем использованным
     const { error: updErr } = await sb
       .from("otp_codes")
       .update({ used: true })
       .eq("id", row.id);
+    if (updErr) console.warn("otp-verify update warn:", updErr);
 
-    if (updErr) console.error("otp-verify update error:", updErr);
-
-    // ищем пользователя по номеру
+    // 4️⃣ Возвращаем профиль
     const { data: users } = await sb
-      .from("users") // измени на "profiles", если у тебя другая таблица
+      .from("users")
       .select("tg_user_id, first_name, last_name, username, phone, photo_url")
       .eq("phone", phoneNorm)
       .limit(1);
 
-    const user = users?.[0] || null;
-
-    return res.json({
-      ok: true,
-      app_token: null,
-      user,
-    });
+    const user = users?.[0] ?? null;
+    return res.json({ ok: true, app_token: null, user });
   } catch (e) {
     console.error("otp-verify error:", e);
     return res.status(500).json({ ok: false, error: "server error" });
