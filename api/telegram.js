@@ -1,13 +1,24 @@
 import { Telegraf, Markup } from "telegraf";
+import jwt from "jsonwebtoken";               // +++
+import crypto from "crypto";                  // +++
 import { sb } from "../lib/db.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN, {
   telegram: { webhookReply: true },
 });
 
+// ===== Config / helpers (new) =====
+const CLAIM_SECRET = process.env.CLAIM_SECRET || "change-me"; // +++
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex"); // +++
+const ITEMS_BTN = "🧾 Мои вещи"; // +++
+
 // ===== Helpers =====
 function mainMenu() {
-  return Markup.keyboard([["👤 Мой профиль", "🎯 Рафлы"], ["⚙️ Настройки"]]).resize();
+  // добавил кнопку "Мои вещи"
+  return Markup.keyboard([
+    ["👤 Мой профиль", "🎯 Рафлы"],
+    [ITEMS_BTN, "⚙️ Настройки"],
+  ]).resize();
 }
 function phoneKeyboard() {
   return Markup.keyboard([[{ text: "📱 Поделиться номером", request_contact: true }]])
@@ -52,7 +63,49 @@ async function saveUser(ctx) {
 bot.start(async (ctx) => {
   await saveUser(ctx);
 
-  // если телефона нет — попросим контакт
+  // --- NEW: обработка QR-клейма (start=claim_...)
+  const payload = ctx.startPayload || "";
+  if (payload.startsWith("claim_")) {
+    const token = payload.slice(6);
+    try {
+      const data = jwt.verify(token, CLAIM_SECRET);
+      if (data.kind !== "claim") {
+        await ctx.reply("Неверный тип ссылки.");
+      } else {
+        const { itemId, jti } = data;
+
+        const { data: item, error } = await sb
+          .from("item_instances")
+          .select("id, status, claim_token_hash")
+          .eq("id", itemId)
+          .single();
+
+        if (error || !item) {
+          await ctx.reply("Товар не найден.");
+        } else if (item.status !== "unclaimed") {
+          await ctx.reply("Товар уже привязан.");
+        } else if (sha256(jti) !== item.claim_token_hash) {
+          await ctx.reply("Токен уже использован или неверен.");
+        } else {
+          const { error: txErr } = await sb.rpc("claim_item", {
+            p_item_id: itemId,
+            p_owner: ctx.from.id,
+            p_new_claim_hash: "used:" + Date.now(),
+          });
+          if (txErr) {
+            await ctx.reply("Не удалось привязать. Попробуй позже.");
+          } else {
+            await ctx.reply("Готово! Вещь добавлена в Мои вещи ✅");
+          }
+        }
+      }
+    } catch {
+      await ctx.reply("Ссылка недействительна или просрочена.");
+    }
+  }
+  // --- /NEW
+
+  // как было: проверка телефона и меню
   const { data: user } = await sb
     .from("users")
     .select("phone")
@@ -83,10 +136,7 @@ bot.on("contact", async (ctx) => {
       ? contact.phone_number
       : "+" + contact.phone_number;
 
-    await sb
-      .from("users")
-      .update({ phone })
-      .eq("tg_user_id", ctx.from.id);
+    await sb.from("users").update({ phone }).eq("tg_user_id", ctx.from.id);
 
     await ctx.reply("Спасибо! Телефон сохранён ✅", mainMenu());
   } catch (e) {
@@ -130,14 +180,43 @@ bot.hears("👤 Мой профиль", async (ctx) => {
       : "Пока нет побед 😔",
   ].join("\n");
 
-  // если телефона нет — напомним добавить
   if (!user?.phone) {
-    await ctx.reply(
-      "Добавь телефон, чтобы мы могли связаться, если ты победишь:",
-      phoneKeyboard()
-    );
+    await ctx.reply("Добавь телефон, чтобы мы могли связаться, если ты победишь:", phoneKeyboard());
   }
   return ctx.reply(text, { parse_mode: "HTML", ...mainMenu() });
+});
+
+// NEW: Мои вещи (список привязанных экземпляров)
+bot.hears(ITEMS_BTN, async (ctx) => {
+  try {
+    const { data: rows, error } = await sb
+      .from("item_instances")
+      .select("id,size,serial,claimed_at,products(title,sku,image_url)") // связь по FK product_id→products.id
+      .eq("claimed_by_tg_id", ctx.from.id)
+      .order("claimed_at", { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+
+    if (!rows?.length) {
+      return ctx.reply("Пока пусто. Отсканируй QR внутри вещи, чтобы добавить её сюда.", mainMenu());
+    }
+
+    const lines = rows.map((r) => {
+      const p = r.products || {};
+      const name = p.title || p.sku || "Product";
+      const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
+      return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
+    });
+
+    return ctx.reply(`<b>🧾 Мои вещи</b>\n\n${lines.join("\n")}`, {
+      parse_mode: "HTML",
+      ...mainMenu(),
+    });
+  } catch (e) {
+    console.error(e);
+    return ctx.reply("Не удалось загрузить список вещей 😔", mainMenu());
+  }
 });
 
 // Рафлы (как раньше)
