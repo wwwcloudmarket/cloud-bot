@@ -2,12 +2,12 @@ import { Telegraf, Markup } from "telegraf";
 import crypto from "crypto";
 import { sb } from "../lib/db.js";
 
-/** ===================== Helpers / Config ===================== */
-
+/** ===================== Bot init ===================== */
 const BOT = new Telegraf(process.env.BOT_TOKEN, {
   telegram: { webhookReply: true },
 });
 
+/** ===================== UI / helpers ===================== */
 const ITEMS_BTN = "🧾 Мои вещи";
 const ADD_PROMPT = "Введите 10-значный код с бирки/карточки вещи:";
 
@@ -17,13 +17,13 @@ const PROMPT_MINT_BATCH = "Введите данные для партии в ф
 const PROMPT_ADM_ADD    = "Укажите @username или ID и роль (admin|manager) через пробел";
 const PROMPT_ADM_DEL    = "Укажите @username или ID для удаления роли";
 
-function mainMenu() {
+function mainMenuMarkup() {
   return Markup.keyboard([
     ["👤 Мой профиль", "🎯 Рафлы"],
     [ITEMS_BTN, "⚙️ Настройки"],
   ]).resize();
 }
-function phoneKeyboard() {
+function phoneKeyboardMarkup() {
   return Markup.keyboard([[{ text: "📱 Поделиться номером", request_contact: true }]])
     .oneTime()
     .resize();
@@ -53,7 +53,7 @@ async function saveUser(ctx) {
   });
 }
 
-/** ===== Коды: хеш/генерация/проверка (Luhn) ===== */
+/** ===================== Codes (Luhn) ===================== */
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
 // 10-значный код: 9 случайных + контрольная (Luhn)
@@ -90,8 +90,7 @@ async function findProductId(skuOrId) {
   return data.id;
 }
 
-/** ===================== Роли из БД ===================== */
-
+/** ===================== Roles (from DB) ===================== */
 const roleCache = new Map();
 async function getRole(tgId) {
   if (roleCache.has(tgId)) return roleCache.get(tgId);
@@ -102,10 +101,11 @@ async function getRole(tgId) {
 }
 async function hasRole(ctx, roles = ["admin"]) {
   const role = await getRole(ctx.from.id);
-  return role && roles.includes(role);
+  return !!role && roles.includes(role);
 }
 async function requireRole(ctx, roles = ["admin"]) {
-  if (!(await hasRole(ctx, roles))) {
+  const ok = await hasRole(ctx, roles);
+  if (!ok) {
     await ctx.reply("Доступ только для админов.");
     return false;
   }
@@ -125,12 +125,15 @@ BOT.start(async (ctx) => {
     .single();
 
   if (!user?.phone) {
-    await ctx.reply(
-      "Для подтверждения аккаунта поделись номером телефона (кнопка ниже) 👇",
-      phoneKeyboard()
-    );
+    const km = phoneKeyboardMarkup();
+    await ctx.reply("Для подтверждения аккаунта поделись номером телефона (кнопка ниже) 👇", {
+      reply_markup: km.reply_markup,
+    });
   } else {
-    await ctx.reply("Добро пожаловать в Cloud Market 🎯\nВыбери пункт меню ниже:", mainMenu());
+    const mm = mainMenuMarkup();
+    await ctx.reply("Добро пожаловать в Cloud Market 🎯\nВыбери пункт меню ниже:", {
+      reply_markup: mm.reply_markup,
+    });
   }
 });
 
@@ -139,17 +142,20 @@ BOT.on("contact", async (ctx) => {
   try {
     const contact = ctx.message?.contact;
     if (!contact || String(contact.user_id) !== String(ctx.from.id)) {
-      return ctx.reply("Можно поделиться только своим номером 😊", phoneKeyboard());
+      const km = phoneKeyboardMarkup();
+      return ctx.reply("Можно поделиться только своим номером 😊", { reply_markup: km.reply_markup });
     }
     const phone = contact.phone_number.startsWith("+")
       ? contact.phone_number
       : "+" + contact.phone_number;
 
     await sb.from("users").update({ phone }).eq("tg_user_id", ctx.from.id);
-    await ctx.reply("Спасибо! Телефон сохранён ✅", mainMenu());
+    const mm = mainMenuMarkup();
+    await ctx.reply("Спасибо! Телефон сохранён ✅", { reply_markup: mm.reply_markup });
   } catch (e) {
     console.error(e);
-    await ctx.reply("Не удалось сохранить номер. Попробуй ещё раз.", phoneKeyboard());
+    const km = phoneKeyboardMarkup();
+    await ctx.reply("Не удалось сохранить номер. Попробуй ещё раз.", { reply_markup: km.reply_markup });
   }
 });
 
@@ -179,19 +185,16 @@ BOT.hears("👤 Мой профиль", async (ctx) => {
     ``,
     `<b>🏆 Победы:</b>`,
     wins?.length
-      ? wins
-          .map(
-            (e, i) =>
-              `${i + 1}. ${e.raffle_id.slice(0, 8)}... — ${new Date(e.decided_at).toLocaleString()}`
-          )
-          .join("\n")
+      ? wins.map((e, i) => `${i + 1}. ${e.raffle_id.slice(0, 8)}... — ${new Date(e.decided_at).toLocaleString()}`).join("\n")
       : "Пока нет побед 😔",
   ].join("\n");
 
+  const mm = mainMenuMarkup();
   if (!user?.phone) {
-    await ctx.reply("Добавь телефон, чтобы мы могли связаться, если ты победишь:", phoneKeyboard());
+    const km = phoneKeyboardMarkup();
+    await ctx.reply("Добавь телефон, чтобы мы могли связаться, если ты победишь:", { reply_markup: km.reply_markup });
   }
-  return ctx.reply(text, { parse_mode: "HTML", ...mainMenu() });
+  return ctx.reply(text, { parse_mode: "HTML", reply_markup: mm.reply_markup });
 });
 
 // Мои вещи
@@ -213,20 +216,19 @@ BOT.hears(ITEMS_BTN, async (ctx) => {
         }).join("\n")
       : "Пока пусто.";
 
-    await ctx.reply(
-      `<b>🧾 Мои вещи</b>\n\n${list}\n\nНажми «Добавить вещь», если у тебя есть код.`,
-      {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")]]),
-      }
-    );
+    const kb = Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")]]);
+    await ctx.reply(`<b>🧾 Мои вещи</b>\n\n${list}\n\nНажми «Добавить вещь», если у тебя есть код.`, {
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
   } catch (e) {
     console.error(e);
-    return ctx.reply("Не удалось загрузить список вещей 😔", mainMenu());
+    const mm = mainMenuMarkup();
+    return ctx.reply("Не удалось загрузить список вещей 😔", { reply_markup: mm.reply_markup });
   }
 });
 
-// Запрос кода для добавления вещи
+// Запрос кода
 BOT.action("ADD_ITEM", async (ctx) => {
   await ctx.answerCbQuery();
   return ctx.reply(ADD_PROMPT, {
@@ -234,12 +236,12 @@ BOT.action("ADD_ITEM", async (ctx) => {
   });
 });
 
-// Force-reply обработчик (и для админ-панели тоже)
+// Force-reply обработчик (пользовательский и админские промпты)
 BOT.on("text", async (ctx) => {
   const prompt = ctx.message?.reply_to_message?.text || "";
   if (!prompt) return;
 
-  // ===== Пользователь ввёл код вещи
+  // --- Пользователь ввёл код вещи ---
   if (prompt.startsWith(ADD_PROMPT)) {
     const raw = (ctx.message.text || "").replace(/\D/g, "");
     if (raw.length !== 10) {
@@ -265,10 +267,10 @@ BOT.on("text", async (ctx) => {
     return;
   }
 
-  // ====== Админ-панель: одна вещь
+  // --- Админ: одна вещь ---
   if (prompt.startsWith(PROMPT_MINT_ONE)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
-    const [sku, size, serialStr] = (ctx.message.text||"").trim().split(/\s+/);
+    const [sku, size, serialStr] = (ctx.message.text || "").trim().split(/\s+/);
     const serial = parseInt(serialStr, 10);
     if (!sku || !size || !serial) return ctx.reply("Нужно: SKU SIZE SERIAL (например CM-TEE-001 L 1)");
     try {
@@ -282,15 +284,16 @@ BOT.on("text", async (ctx) => {
       if (error) throw error;
       await ctx.reply(`✅ Создано\nID: <code>${row.id}</code>\n${size} #${serial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML" });
     } catch (e) {
-      console.error(e); await ctx.reply("Ошибка создания.");
+      console.error(e);
+      await ctx.reply("Ошибка создания.");
     }
     return;
   }
 
-  // ====== Админ-панель: партия
+  // --- Админ: партия ---
   if (prompt.startsWith(PROMPT_MINT_BATCH)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
-    const [sku, size, rangeRaw] = (ctx.message.text||"").trim().split(/\s+/);
+    const [sku, size, rangeRaw] = (ctx.message.text || "").trim().split(/\s+/);
     if (!sku || !size || !rangeRaw) return ctx.reply("Нужно: SKU SIZE RANGE (1..10 или 1,2,5)");
     let serials = [];
     if (/^\d+\.\.\d+$/.test(rangeRaw)) {
@@ -316,17 +319,18 @@ BOT.on("text", async (ctx) => {
       }
       await ctx.reply(`✅ Партия создана: ${serials.length} шт.`);
     } catch (e) {
-      console.error(e); await ctx.reply("Ошибка создания партии.");
+      console.error(e);
+      await ctx.reply("Ошибка создания партии.");
     }
     return;
   }
 
-  // ====== Админ-панель: роли — добавить
+  // --- Админ: роли — добавить ---
   if (prompt.startsWith(PROMPT_ADM_ADD)) {
     if (!(await requireRole(ctx, ["admin"]))) return;
-    const parts = (ctx.message.text||"").trim().split(/\s+/);
+    const parts = (ctx.message.text || "").trim().split(/\s+/);
     if (parts.length < 2) return ctx.reply("Нужно: @username|ID role");
-    const who = parts[0].replace(/^@/,"");
+    const who = parts[0].replace(/^@/, "");
     const role = parts[1];
     if (!["admin","manager"].includes(role)) return ctx.reply("Роль только admin или manager");
 
@@ -341,10 +345,10 @@ BOT.on("text", async (ctx) => {
     return ctx.reply(`Готово. Назначено: ${who} — ${role}`);
   }
 
-  // ====== Админ-панель: роли — снять
+  // --- Админ: роли — снять ---
   if (prompt.startsWith(PROMPT_ADM_DEL)) {
     if (!(await requireRole(ctx, ["admin"]))) return;
-    const who = (ctx.message.text||"").trim().replace(/^@/,"");
+    const who = (ctx.message.text || "").trim().replace(/^@/, "");
     if (!who) return ctx.reply("Нужно: @username|ID");
 
     let tgId = /^\d+$/.test(who) ? Number(who) : null;
@@ -368,16 +372,17 @@ BOT.hears("🎯 Рафлы", async (ctx) => {
     .order("starts_at", { ascending: true });
 
   if (!raffles || raffles.length === 0) {
-    return ctx.reply("❌ Сейчас нет активных дропов.", mainMenu());
+    const mm = mainMenuMarkup();
+    return ctx.reply("❌ Сейчас нет активных дропов.", { reply_markup: mm.reply_markup });
   }
 
   for (const r of raffles) {
     const text = `🎯 <b>${html(r.title)}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
-    const button = Markup.inlineKeyboard([[Markup.button.callback("🪩 Участвовать", `join_${r.id}`)]]);
+    const kb = Markup.inlineKeyboard([[Markup.button.callback("🪩 Участвовать", `join_${r.id}`)]]);
     if (r.image_url) {
-      await ctx.replyWithPhoto(r.image_url, { caption: text, parse_mode: "HTML", ...button });
+      await ctx.replyWithPhoto(r.image_url, { caption: text, parse_mode: "HTML", reply_markup: kb.reply_markup });
     } else {
-      await ctx.reply(text, { parse_mode: "HTML", ...button });
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
     }
   }
 });
@@ -393,7 +398,8 @@ BOT.action(/join_(.+)/, async (ctx) => {
 
     if (raffle.is_finished) {
       await ctx.answerCbQuery("❌ Дроп завершён!");
-      return ctx.reply("❌ Дроп уже закрыт!");
+      const mm = mainMenuMarkup();
+      return ctx.reply("❌ Дроп уже закрыт!", { reply_markup: mm.reply_markup });
     }
 
     const { data: existing } = await sb.from("winners").select("id").eq("raffle_id", raffleId);
@@ -421,9 +427,7 @@ BOT.action(/join_(.+)/, async (ctx) => {
 
     await ctx.answerCbQuery("🎉 Ты выиграл!");
     await ctx.reply(
-      `🏆 Поздравляем, ${html(user.first_name || "участник")}!\nТы стал победителем дропа <b>${html(
-        raffle.title
-      )}</b> 🎯`,
+      `🏆 Поздравляем, ${html(user.first_name || "участник")}!\nТы стал победителем дропа <b>${html(r.title)}</b> 🎯`,
       { parse_mode: "HTML" }
     );
 
@@ -434,7 +438,7 @@ BOT.action(/join_(.+)/, async (ctx) => {
       if (process.env.CHAT_ID) {
         await BOT.telegram.sendMessage(
           process.env.CHAT_ID,
-          `🎯 Дроп <b>${html(raffle.title)}</b> завершён!\nПобедителей: ${raffle.winners_count}`,
+          `🎯 Дроп <b>${html(r.title)}</b> завершён!\nПобедителей: ${r.winners_count}`,
           { parse_mode: "HTML" }
         );
       }
@@ -447,16 +451,15 @@ BOT.action(/join_(.+)/, async (ctx) => {
 
 // Настройки
 BOT.hears("⚙️ Настройки", async (ctx) => {
-  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", phoneKeyboard());
-  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", mainMenu());
+  const km = phoneKeyboardMarkup();
+  const mm = mainMenuMarkup();
+  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", { reply_markup: km.reply_markup });
+  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", { reply_markup: mm.reply_markup });
 });
 
-/** ===================== Admin Panel (кнопки) ===================== */
-
+/** ===================== Admin panel (buttons) ===================== */
 BOT.command("admin", async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return; // <- в этом случае бот пишет "Доступ только для админов."
-  // ... тут рисуем панель
-});
+  if (!(await requireRole(ctx, ["admin","manager"]))) return;
 
   const rows = [
     [ Markup.button.callback("➕ Код для вещи", "ADM_MINT_ONE"),
@@ -471,47 +474,48 @@ BOT.command("admin", async (ctx) => {
     ]);
     rows.push([Markup.button.callback("📋 Роли: список", "ADM_ROLE_LIST")]);
   }
-  await ctx.reply("👑 Админ-панель", Markup.inlineKeyboard(rows));
+  const kb = Markup.inlineKeyboard(rows);
+  await ctx.reply("👑 Админ-панель", { reply_markup: kb.reply_markup });
 });
 
 BOT.action("ADM_MINT_ONE", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   await ctx.answerCbQuery();
-  return ctx.reply(PROMPT_MINT_ONE, { reply_markup: { force_reply: true, input_field_placeholder: "CM-TEE-001 L 1" }});
+  return ctx.reply(PROMPT_MINT_ONE, { reply_markup: { force_reply: true, input_field_placeholder: "CM-TEE-001 L 1" } });
 });
 BOT.action("ADM_MINT_BATCH", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   await ctx.answerCbQuery();
-  return ctx.reply(PROMPT_MINT_BATCH, { reply_markup: { force_reply: true, input_field_placeholder: "CM-TEE-001 L 1..10" }});
+  return ctx.reply(PROMPT_MINT_BATCH, { reply_markup: { force_reply: true, input_field_placeholder: "CM-TEE-001 L 1..10" } });
 });
 BOT.action("ADM_ADD_DROP", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   await ctx.answerCbQuery();
-  await ctx.reply('Скопируйте и заполните:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg');
+  await ctx.reply("Скопируйте и заполните:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg");
 });
 BOT.action("ADM_FINISH_DROP", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   await ctx.answerCbQuery();
-  await ctx.reply('Скопируйте и заполните:\n/finish <raffle_uuid>');
+  await ctx.reply("Скопируйте и заполните:\n/finish <raffle_uuid>");
 });
 
 // роли (только admin)
 BOT.action("ADM_ROLE_ADD", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   await ctx.answerCbQuery();
-  return ctx.reply(PROMPT_ADM_ADD, { reply_markup: { force_reply: true, input_field_placeholder: "@username admin" }});
+  return ctx.reply(PROMPT_ADM_ADD, { reply_markup: { force_reply: true, input_field_placeholder: "@username admin" } });
 });
 BOT.action("ADM_ROLE_DEL", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   await ctx.answerCbQuery();
-  return ctx.reply(PROMPT_ADM_DEL, { reply_markup: { force_reply: true, input_field_placeholder: "@username" }});
+  return ctx.reply(PROMPT_ADM_DEL, { reply_markup: { force_reply: true, input_field_placeholder: "@username" } });
 });
 BOT.action("ADM_ROLE_LIST", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   const { data } = await sb.from("user_roles").select("tg_user_id, role, created_at").order("created_at", { ascending: false });
   if (!data?.length) return ctx.reply("Список ролей пуст.");
   const users = await sb.from("users").select("tg_user_id, username, first_name").in("tg_user_id", data.map(x=>x.tg_user_id));
-  const byId = new Map((users.data||[]).map(u => [u.tg_user_id, u]));
+  const byId = new Map((users.data || []).map(u => [u.tg_user_id, u]));
   const lines = data.map(r => {
     const u = byId.get(r.tg_user_id);
     const nick = u?.username ? "@"+u.username : (u?.first_name || r.tg_user_id);
@@ -520,16 +524,13 @@ BOT.action("ADM_ROLE_LIST", async (ctx) => {
   await ctx.reply(`📋 Роли:\n${lines.join("\n")}`);
 });
 
-/** ===================== Admin: команды /adddrop /finish ===================== */
-
+/** ===================== Admin: /adddrop /finish ===================== */
 BOT.command("adddrop", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   const raw = ctx.message.text.replace(/^\/adddrop\s*/i, "");
   const parts = raw.split("|").map((s) => s.trim());
   if (parts.length < 3) {
-    return ctx.reply(
-      "Формат:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg (опционально)"
-    );
+    return ctx.reply("Формат:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg (опционально)");
   }
   const [title, starts, winnersCountStr, imageUrl] = parts;
   const winners_count = parseInt(winnersCountStr, 10) || 1;
@@ -573,10 +574,9 @@ BOT.command("finish", async (ctx) => {
 });
 
 /** ===================== Vercel webhook ===================== */
-
 export default async function handler(req, res) {
   try {
-    const secret = req.query.secret;
+    const secret = req.query?.secret;
     if (secret !== process.env.WEBHOOK_SECRET) {
       return res.status(401).json({ ok: false });
     }
@@ -584,7 +584,6 @@ export default async function handler(req, res) {
     return res.json({ ok: true });
   } catch (e) {
     console.error("Bot error:", e);
-    // Всегда 200, чтобы Telegram не ретраил бесконечно
     return res.status(200).json({ ok: true });
   }
 }
