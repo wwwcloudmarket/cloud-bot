@@ -1,20 +1,25 @@
 import { Telegraf, Markup } from "telegraf";
-import jwt from "jsonwebtoken";               // +++
-import crypto from "crypto";                  // +++
+import crypto from "crypto";
 import { sb } from "../lib/db.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN, {
   telegram: { webhookReply: true },
 });
 
-// ===== Config / helpers (new) =====
-const CLAIM_SECRET = process.env.CLAIM_SECRET || "change-me"; // +++
-const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex"); // +++
-const ITEMS_BTN = "🧾 Мои вещи"; // +++
+/* ===================== Helpers / Config ===================== */
 
-// ===== Helpers =====
+const ITEMS_BTN = "🧾 Мои вещи";
+const ADD_PROMPT = "Введите 10-значный код с бирки/карточки вещи:";
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function isAdmin(ctx) {
+  return ADMIN_IDS.includes(String(ctx.from?.id || ""));
+}
+
 function mainMenu() {
-  // добавил кнопку "Мои вещи"
   return Markup.keyboard([
     ["👤 Мой профиль", "🎯 Рафлы"],
     [ITEMS_BTN, "⚙️ Настройки"],
@@ -27,17 +32,9 @@ function phoneKeyboard() {
 }
 function maskPhone(p) {
   if (!p) return "—";
-  // +7 999 *** ** 11
   const digits = p.replace(/[^\d+]/g, "");
   if (digits.length < 6) return digits;
   return digits.slice(0, 3) + " " + digits.slice(3, 6) + " *** ** " + digits.slice(-2);
-}
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-function isAdmin(ctx) {
-  return ADMIN_IDS.includes(String(ctx.from?.id || ""));
 }
 function html(s) {
   return s?.replace?.(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) ?? s;
@@ -46,7 +43,6 @@ function parseDateToISO(s) {
   const t = s.trim().replace(" ", "T") + ":00.000Z";
   return new Date(t).toISOString();
 }
-
 async function saveUser(ctx) {
   const u = ctx.from;
   if (!u) return;
@@ -59,53 +55,49 @@ async function saveUser(ctx) {
   });
 }
 
-// ===== Public =====
+/* ===== Коды: хеш/генерация/проверка (Luhn) ===== */
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+// 10-значный код: 9 случайных + контрольная (Luhn)
+function genCode10() {
+  const base = Array.from({ length: 9 }, () => Math.floor(Math.random() * 10));
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    let d = base[8 - i];
+    if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  const check = (10 - (sum % 10)) % 10;
+  return base.join("") + String(check);
+}
+function luhnOk(code) {
+  if (!/^\d{10}$/.test(code)) return false;
+  const digits = code.split("").map(Number);
+  const check = digits.pop();
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let d = digits[digits.length - 1 - i];
+    if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  return ((sum + check) % 10) === 0;
+}
+
+// поиск товара по SKU или UUID
+async function findProductId(skuOrId) {
+  const isUuid = /^[0-9a-f-]{36}$/i.test(skuOrId);
+  if (isUuid) return skuOrId;
+  const { data, error } = await sb.from("products").select("id").eq("sku", skuOrId).maybeSingle();
+  if (error || !data) throw new Error("Товар не найден по SKU: " + skuOrId);
+  return data.id;
+}
+
+/* ===================== Public ===================== */
+
+// Старт
 bot.start(async (ctx) => {
   await saveUser(ctx);
 
-  // --- NEW: обработка QR-клейма (start=claim_...)
-  const payload = ctx.startPayload || "";
-  if (payload.startsWith("claim_")) {
-    const token = payload.slice(6);
-    try {
-      const data = jwt.verify(token, CLAIM_SECRET);
-      if (data.kind !== "claim") {
-        await ctx.reply("Неверный тип ссылки.");
-      } else {
-        const { itemId, jti } = data;
-
-        const { data: item, error } = await sb
-          .from("item_instances")
-          .select("id, status, claim_token_hash")
-          .eq("id", itemId)
-          .single();
-
-        if (error || !item) {
-          await ctx.reply("Товар не найден.");
-        } else if (item.status !== "unclaimed") {
-          await ctx.reply("Товар уже привязан.");
-        } else if (sha256(jti) !== item.claim_token_hash) {
-          await ctx.reply("Токен уже использован или неверен.");
-        } else {
-          const { error: txErr } = await sb.rpc("claim_item", {
-            p_item_id: itemId,
-            p_owner: ctx.from.id,
-            p_new_claim_hash: "used:" + Date.now(),
-          });
-          if (txErr) {
-            await ctx.reply("Не удалось привязать. Попробуй позже.");
-          } else {
-            await ctx.reply("Готово! Вещь добавлена в Мои вещи ✅");
-          }
-        }
-      }
-    } catch {
-      await ctx.reply("Ссылка недействительна или просрочена.");
-    }
-  }
-  // --- /NEW
-
-  // как было: проверка телефона и меню
   const { data: user } = await sb
     .from("users")
     .select("phone")
@@ -122,22 +114,18 @@ bot.start(async (ctx) => {
   }
 });
 
-// принимаем контакт и сохраняем телефон
+// Принимаем контакт и сохраняем телефон
 bot.on("contact", async (ctx) => {
   try {
     const contact = ctx.message?.contact;
     if (!contact || String(contact.user_id) !== String(ctx.from.id)) {
-      // игнорируем контакты не владельца
       return ctx.reply("Можно поделиться только своим номером 😊", phoneKeyboard());
     }
-
-    // сохраняем номер (+7999...)
     const phone = contact.phone_number.startsWith("+")
       ? contact.phone_number
       : "+" + contact.phone_number;
 
     await sb.from("users").update({ phone }).eq("tg_user_id", ctx.from.id);
-
     await ctx.reply("Спасибо! Телефон сохранён ✅", mainMenu());
   } catch (e) {
     console.error(e);
@@ -145,7 +133,7 @@ bot.on("contact", async (ctx) => {
   }
 });
 
-// Мой профиль
+// Профиль
 bot.hears("👤 Мой профиль", async (ctx) => {
   await saveUser(ctx);
   const id = ctx.from.id;
@@ -186,40 +174,78 @@ bot.hears("👤 Мой профиль", async (ctx) => {
   return ctx.reply(text, { parse_mode: "HTML", ...mainMenu() });
 });
 
-// NEW: Мои вещи (список привязанных экземпляров)
+// Мои вещи — список + кнопка «Добавить вещь»
 bot.hears(ITEMS_BTN, async (ctx) => {
   try {
-    const { data: rows, error } = await sb
+    const { data: rows } = await sb
       .from("item_instances")
-      .select("id,size,serial,claimed_at,products(title,sku,image_url)") // связь по FK product_id→products.id
+      .select("id,size,serial,claimed_at,products(title,sku,image_url)")
       .eq("claimed_by_tg_id", ctx.from.id)
       .order("claimed_at", { ascending: false })
       .limit(20);
 
-    if (error) throw error;
+    const list = (rows?.length)
+      ? rows.map(r => {
+          const p = r.products || {};
+          const name = p.title || p.sku || "Product";
+          const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
+          return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
+        }).join("\n")
+      : "Пока пусто.";
 
-    if (!rows?.length) {
-      return ctx.reply("Пока пусто. Отсканируй QR внутри вещи, чтобы добавить её сюда.", mainMenu());
-    }
-
-    const lines = rows.map((r) => {
-      const p = r.products || {};
-      const name = p.title || p.sku || "Product";
-      const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
-      return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
-    });
-
-    return ctx.reply(`<b>🧾 Мои вещи</b>\n\n${lines.join("\n")}`, {
-      parse_mode: "HTML",
-      ...mainMenu(),
-    });
+    await ctx.reply(
+      `<b>🧾 Мои вещи</b>\n\n${list}\n\nНажми «Добавить вещь», если у тебя есть код.`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")]]),
+      }
+    );
   } catch (e) {
     console.error(e);
     return ctx.reply("Не удалось загрузить список вещей 😔", mainMenu());
   }
 });
 
-// Рафлы (как раньше)
+// Запрос ввода кода
+bot.action("ADD_ITEM", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.reply(ADD_PROMPT, {
+    reply_markup: { force_reply: true, input_field_placeholder: "Например: 1234567890" },
+  });
+});
+
+// Обработка ответа с кодом (force reply)
+bot.on("text", async (ctx) => {
+  const q = ctx.message?.reply_to_message?.text || "";
+  if (!q || !q.startsWith(ADD_PROMPT)) return; // не наш ответ
+
+  const raw = (ctx.message.text || "").replace(/\D/g, "");
+  if (raw.length !== 10) {
+    return ctx.reply("Код должен состоять из 10 цифр. Нажмите «➕ Добавить вещь» и попробуйте ещё раз.");
+  }
+  if (!luhnOk(raw)) {
+    return ctx.reply("Похоже, код введён с ошибкой (контрольная цифра не сходится). Проверьте и попробуйте снова.");
+  }
+
+  try {
+    const hash = sha256(raw);
+    const { error } = await sb.rpc("claim_item_by_code", {
+      p_code_hash: hash,
+      p_owner: ctx.from.id,
+    });
+
+    if (error) {
+      return ctx.reply("Код не найден или уже использован. Проверьте цифры и попробуйте снова.");
+    }
+
+    await ctx.reply("Готово! Вещь добавлена в «Мои вещи» ✅");
+  } catch (e) {
+    console.error(e);
+    return ctx.reply("Не удалось добавить вещь. Попробуйте позже.");
+  }
+});
+
+// Рафлы
 bot.hears("🎯 Рафлы", async (ctx) => {
   const { data: raffles } = await sb
     .from("raffles")
@@ -242,13 +268,7 @@ bot.hears("🎯 Рафлы", async (ctx) => {
   }
 });
 
-// Настройки — кнопка для повторного запроса телефона
-bot.hears("⚙️ Настройки", async (ctx) => {
-  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", phoneKeyboard());
-  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", mainMenu());
-});
-
-// Участие (мульти-победители — как раньше)
+// Участие
 bot.action(/join_(.+)/, async (ctx) => {
   const raffleId = ctx.match[1];
   const user = ctx.from;
@@ -311,7 +331,14 @@ bot.action(/join_(.+)/, async (ctx) => {
   }
 });
 
-// ===== Admin (без изменений основного функционала) =====
+// Настройки
+bot.hears("⚙️ Настройки", async (ctx) => {
+  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", phoneKeyboard());
+  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", mainMenu());
+});
+
+/* ===================== Admin ===================== */
+
 const ADMIN_IDS_RAW = ADMIN_IDS.length ? `\n\nАдмины: ${ADMIN_IDS.join(", ")}` : "";
 
 bot.command("admin", async (ctx) => {
@@ -322,7 +349,13 @@ bot.command("admin", async (ctx) => {
     "<code>/adddrop Название | 2025-11-05 18:00 | 2 | https://.../image.jpg</code>\n" +
     "image_url — опционально\n\n" +
     "• Завершить дроп вручную:\n" +
-    "<code>/finish &lt;raffle_uuid&gt;</code>" +
+    "<code>/finish &lt;raffle_uuid&gt;</code>\n\n" +
+    "• Создать вещь с кодом:\n" +
+    "<code>/mintcode &lt;SKU|product_id&gt; &lt;SIZE&gt; &lt;SERIAL&gt;</code>\n" +
+    "Пример: <code>/mintcode CM-TEE-001 L 1</code>\n\n" +
+    "• Партия вещей с кодами:\n" +
+    "<code>/mintbatchcode &lt;SKU|product_id&gt; &lt;SIZE&gt; &lt;RANGE&gt;</code>\n" +
+    "Примеры: <code>/mintbatchcode CM-TEE-001 L 1..10</code> или <code>1,3,5</code>" +
     ADMIN_IDS_RAW;
   await ctx.reply(text, { parse_mode: "HTML" });
 });
@@ -377,7 +410,88 @@ bot.command("finish", async (ctx) => {
   }
 });
 
-// ===== Vercel webhook handler =====
+// admin: создать одну вещь с кодом
+bot.command("mintcode", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  // /mintcode <SKU|product_id> <SIZE> <SERIAL>
+  const args = ctx.message.text.trim().split(/\s+/).slice(1);
+  if (args.length < 3) {
+    return ctx.reply("Формат: /mintcode <SKU|product_id> <SIZE> <SERIAL>\nПример: /mintcode CM-TEE-001 L 1");
+  }
+  const [skuOrId, size, serialStr] = args;
+  const serial = parseInt(serialStr, 10);
+  if (!serial) return ctx.reply("Serial должен быть числом");
+
+  try {
+    const product_id = await findProductId(skuOrId);
+    const code = genCode10();
+    const hash = sha256(code);
+
+    const { data: row, error } = await sb
+      .from("item_instances")
+      .insert({ product_id, size, serial, claim_code_hash: hash, claim_token_hash: "code" })
+      .select("id")
+      .single();
+    if (error) throw error;
+
+    await ctx.reply(
+      `✅ Создан экземпляр\nID: <code>${row.id}</code>\n${size} #${serial}\nКОД: <b>${code}</b>\n\nВпишите/напечатайте этот код на бирку.`,
+      { parse_mode: "HTML" }
+    );
+  } catch (e) {
+    console.error(e);
+    ctx.reply("Не удалось создать: " + (e.message || "ошибка"));
+  }
+});
+
+// admin: партия вещей с кодами
+bot.command("mintbatchcode", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  // /mintbatchcode <SKU|product_id> <SIZE> <RANGE> (1..20 или 1,2,5)
+  const args = ctx.message.text.trim().split(/\s+/).slice(1);
+  if (args.length < 3) {
+    return ctx.reply(
+      "Формат: /mintbatchcode <SKU|product_id> <SIZE> <RANGE>\nПримеры:\n/mintbatchcode CM-TEE-001 L 1..10\n/mintbatchcode CM-TEE-001 M 1,3,5"
+    );
+  }
+  const [skuOrId, size, rangeRaw] = args;
+  let serials = [];
+  if (/^\d+\.\.\d+$/.test(rangeRaw)) {
+    const [a, b] = rangeRaw.split("..").map((n) => parseInt(n, 10));
+    for (let i = a; i <= b; i++) serials.push(i);
+  } else {
+    serials = rangeRaw.split(",").map((n) => parseInt(n.trim(), 10)).filter(Boolean);
+  }
+  if (!serials.length) return ctx.reply("Пустой диапазон серийников");
+
+  try {
+    const product_id = await findProductId(skuOrId);
+    const lines = [];
+    for (const s of serials) {
+      const code = genCode10();
+      const hash = sha256(code);
+      const { error } = await sb
+        .from("item_instances")
+        .insert({ product_id, size, serial: s, claim_code_hash: hash, claim_token_hash: "code" });
+      if (error) throw error;
+      lines.push(`${size} #${s} — ${code}`);
+    }
+
+    const text =
+      `✅ Партия создана (${lines.length} шт.)\n` +
+      `Товар: ${skuOrId} / размер: ${size}\n\n` +
+      lines.join("\n");
+    for (let i = 0; i < text.length; i += 3500) {
+      await ctx.reply(text.slice(i, i + 3500));
+    }
+  } catch (e) {
+    console.error(e);
+    ctx.reply("Не удалось создать партию: " + (e.message || "ошибка"));
+  }
+});
+
+/* ===================== Vercel webhook ===================== */
+
 export default async function handler(req, res) {
   try {
     const secret = req.query.secret;
