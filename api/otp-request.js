@@ -28,11 +28,18 @@ export default async function handler(req, res) {
     const code_hash = crypto.createHash("sha256").update(code).digest("hex");
 
     // сохраняем код в БД
-    const { error: insErr } = await sb.from("otp_codes").insert({
-      phone_raw: phoneRaw,
-      phone_norm: phoneNorm,
-      code_hash,
-    });
+ // Добавляем срок действия (например, 10 минут)
+const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+const { error: insErr } = await sb
+  .from("otp_codes")
+  .insert({
+    phone: phoneNorm,
+    phone_raw: phoneRaw,
+    phone_norm: phoneNorm,
+    code_hash,
+    expires_at: expiresAt, // ✅ добавили
+  });
 
     if (insErr) {
       console.error("otp-request insert error:", insErr);
