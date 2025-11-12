@@ -231,9 +231,9 @@ BOT.action("ADD_ITEM", async (ctx) => {
 });
 
 /** ===== Force-reply: пользовательский + админские промпты ===== */
-BOT.on("text", async (ctx) => {
+BOT.on("text", async (ctx, next) => {
   const prompt = ctx.message?.reply_to_message?.text || "";
-  if (!prompt) return;
+  if (!prompt) return next();
 
   // Пользователь: ввод кода
   if (prompt.startsWith(ADD_PROMPT)) {
