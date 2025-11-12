@@ -58,12 +58,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "wrong code" });
     }
 
-    // 3️⃣ Помечаем использованным
-    const { error: updErr } = await sb
-      .from("otp_codes")
-      .update({ used: true })
-      .eq("id", row.id);
-    if (updErr) console.warn("otp-verify update warn:", updErr);
+    // ✅ помечаем как использованный
+await sb.from("otp_codes")
+  .update({ used: true })
+  .eq("id", row.id);
+
+// 🧹 полностью удаляем код после отметки
+await sb.from("otp_codes")
+  .delete()
+  .eq("id", row.id);
 
     // 4️⃣ Возвращаем профиль
     const { data: users } = await sb
