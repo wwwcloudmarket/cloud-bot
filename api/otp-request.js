@@ -1,7 +1,15 @@
 // api/otp-request.js
 import { sb } from "../lib/db.js";
-import { normalizePhone } from "../lib/phone.js";
 import crypto from "node:crypto";
+
+function normalizePhone(raw) {
+  if (!raw) return null;
+  let digits = String(raw).replace(/\D+/g, "");
+  if (digits.startsWith("8") && digits.length === 11) digits = "7" + digits.slice(1);
+  if (digits.length === 10) digits = "7" + digits;
+  if (!digits.startsWith("7")) digits = "7" + digits;
+  return "+" + digits;
+}
 
 function cors(res) {
   const origin = process.env.TILDA_ORIGIN || "*";
@@ -10,42 +18,10 @@ function cors(res) {
   res.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
-// простая SHA-256
-function sha256(s) {
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
-
-// Telegram send via Bot API
-async function sendTelegramCode(chatId, code) {
-  const token = process.env.BOT_TOKEN;
-  if (!token) throw new Error("BOT_TOKEN is not set");
-
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body = {
-    chat_id: chatId,
-    text: `🔐 Ваш код для входа: *${code}*\n\nКод действителен 10 минут.`,
-    parse_mode: "Markdown",
-    disable_web_page_preview: true
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`Telegram sendMessage failed: ${resp.status} ${txt}`);
-  }
-}
-
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "method not allowed" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
@@ -53,20 +29,18 @@ export default async function handler(req, res) {
     const phoneNorm = normalizePhone(phoneRaw);
     if (!phoneNorm) return res.status(400).json({ ok: false, error: "invalid phone" });
 
-    // 1) генерируем код и производные
-    const code = String(Math.floor(1000 + Math.random() * 9000)); // 4 цифры
-    const code_hash = sha256(code);
-    const expires_at = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 минут
+    // 1️⃣ Генерация и хэширование кода
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 минут
 
-    // 2) пишем в otp_codes (таблица с колонками: id, code_hash, expires_at, phone, phone_norm, phone_raw, used)
+    // 2️⃣ Сохраняем код
     const { error: insErr } = await sb
       .from("otp_codes")
       .insert({
-        phone: phoneNorm,        // если у тебя NOT NULL — заполняем
-        phone_raw: phoneRaw,
-        phone_norm: phoneNorm,
-        code_hash,               // мы храним только хэш
-        expires_at,              // обязательное поле, если NOT NULL
+        phone: phoneNorm,
+        code_hash: codeHash,
+        expires_at: expiresAt,
         used: false
       });
 
@@ -75,34 +49,43 @@ export default async function handler(req, res) {
       return res.status(500).json({ ok: false, error: "db error" });
     }
 
-    // 3) ищем у пользователя tg_user_id, чтобы отправить код в Telegram
+    // 3️⃣ Ищем Telegram ID
     const { data: users, error: userErr } = await sb
-      .from("users") // или "profiles" — подставь свою таблицу профилей
+      .from("users")
       .select("tg_user_id")
       .eq("phone", phoneNorm)
       .limit(1);
 
-    if (userErr) {
-      console.error("otp-request users select error:", userErr);
-      // не падаем: просто не отправим в ТГ
-    }
+    if (userErr) console.warn("users lookup error:", userErr);
 
     const chatId = users?.[0]?.tg_user_id;
+    const token = process.env.BOT_TOKEN;
 
-    // 4) отправляем в ТГ, если chatId известен
-    if (chatId) {
+    // 4️⃣ Отправляем код в Telegram
+    if (chatId && token) {
+      const text = `🔐 Ваш код для входа: *${code}*\nОн действителен 10 минут.`;
       try {
-        await sendTelegramCode(chatId, code);
+        const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: "Markdown"
+          })
+        });
+
+        if (!resp.ok) {
+          const txt = await resp.text();
+          console.error("Telegram error:", txt);
+        }
       } catch (e) {
-        console.error("telegram send error:", e);
-        // не падаем, код в БД есть — можно ввести вручную из логов при отладке
+        console.error("Telegram send failed:", e);
       }
     } else {
-      console.log(`No tg_user_id for ${phoneNorm}. Ask user to /start the bot.`);
+      console.warn("no chatId or BOT_TOKEN; not sending Telegram");
+      console.log(`Код для ${phoneNorm}: ${code}`); // ← для теста в логах
     }
-
-    // 5) для отладки можно временно логировать код на сервере
-    console.log(`OTP sent to ${phoneNorm}: ${code}`);
 
     return res.json({ ok: true });
   } catch (e) {
