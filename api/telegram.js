@@ -11,7 +11,6 @@ const BOT = new Telegraf(process.env.BOT_TOKEN, {
 const ITEMS_BTN = "🧾 Мои вещи";
 const ADD_PROMPT = "Введите 10-значный код с бирки/карточки вещи:";
 
-// Админ-панель (промпты)
 const PROMPT_MINT_ONE   = "Введите данные для одной вещи в формате: SKU SIZE SERIAL";
 const PROMPT_MINT_BATCH = "Введите данные для партии в формате: SKU SIZE RANGE (например 1..10 или 1,2,5)";
 const PROMPT_ADM_ADD    = "Укажите @username или ID и роль (admin|manager) через пробел";
@@ -56,7 +55,6 @@ async function saveUser(ctx) {
 /** ===================== Codes (Luhn) ===================== */
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
-// 10-значный код: 9 случайных + контрольная (Luhn)
 function genCode10() {
   const base = Array.from({ length: 9 }, () => Math.floor(Math.random() * 10));
   let sum = 0;
@@ -80,8 +78,6 @@ function luhnOk(code) {
   }
   return ((sum + check) % 10) === 0;
 }
-
-// Поиск product_id по SKU или UUID
 async function findProductId(skuOrId) {
   const isUuid = /^[0-9a-f-]{36}$/i.test(skuOrId);
   if (isUuid) return skuOrId;
@@ -112,9 +108,11 @@ async function requireRole(ctx, roles = ["admin"]) {
   return true;
 }
 
-/** ===================== Public ===================== */
+/** ===================== Diagnostics ===================== */
+BOT.command("ping", (ctx) => ctx.reply("pong"));
+BOT.command("id",   (ctx) => ctx.reply(`Ваш ID: ${ctx.from.id}`));
 
-// /start
+/** ===================== Public ===================== */
 BOT.start(async (ctx) => {
   await saveUser(ctx);
 
@@ -137,7 +135,6 @@ BOT.start(async (ctx) => {
   }
 });
 
-// контакт
 BOT.on("contact", async (ctx) => {
   try {
     const contact = ctx.message?.contact;
@@ -159,7 +156,6 @@ BOT.on("contact", async (ctx) => {
   }
 });
 
-// профиль
 BOT.hears("👤 Мой профиль", async (ctx) => {
   await saveUser(ctx);
   const id = ctx.from.id;
@@ -197,7 +193,6 @@ BOT.hears("👤 Мой профиль", async (ctx) => {
   return ctx.reply(text, { parse_mode: "HTML", reply_markup: mm.reply_markup });
 });
 
-// Мои вещи
 BOT.hears(ITEMS_BTN, async (ctx) => {
   try {
     const { data: rows } = await sb
@@ -228,7 +223,6 @@ BOT.hears(ITEMS_BTN, async (ctx) => {
   }
 });
 
-// Запрос кода
 BOT.action("ADD_ITEM", async (ctx) => {
   await ctx.answerCbQuery();
   return ctx.reply(ADD_PROMPT, {
@@ -236,12 +230,12 @@ BOT.action("ADD_ITEM", async (ctx) => {
   });
 });
 
-// Force-reply обработчик (пользовательский и админские промпты)
+/** ===== Force-reply: пользовательский + админские промпты ===== */
 BOT.on("text", async (ctx) => {
   const prompt = ctx.message?.reply_to_message?.text || "";
   if (!prompt) return;
 
-  // --- Пользователь ввёл код вещи ---
+  // Пользователь: ввод кода
   if (prompt.startsWith(ADD_PROMPT)) {
     const raw = (ctx.message.text || "").replace(/\D/g, "");
     if (raw.length !== 10) {
@@ -267,7 +261,7 @@ BOT.on("text", async (ctx) => {
     return;
   }
 
-  // --- Админ: одна вещь ---
+  // Админ: одна вещь
   if (prompt.startsWith(PROMPT_MINT_ONE)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const [sku, size, serialStr] = (ctx.message.text || "").trim().split(/\s+/);
@@ -282,7 +276,7 @@ BOT.on("text", async (ctx) => {
         .insert({ product_id, size, serial, claim_code_hash: hash, claim_token_hash: "code" })
         .select("id").single();
       if (error) throw error;
-      await ctx.reply(`✅ Создано\nID: <code>${row.id}</code>\n${size} #${serial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML" });
+      await ctx.reply(`✅ Создано\nID: <code>${row.id}</code>\n${size} #${serial}\нКОД: <b>${code}</b>`, { parse_mode: "HTML" });
     } catch (e) {
       console.error(e);
       await ctx.reply("Ошибка создания.");
@@ -290,7 +284,7 @@ BOT.on("text", async (ctx) => {
     return;
   }
 
-  // --- Админ: партия ---
+  // Админ: партия
   if (prompt.startsWith(PROMPT_MINT_BATCH)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const [sku, size, rangeRaw] = (ctx.message.text || "").trim().split(/\s+/);
@@ -325,7 +319,7 @@ BOT.on("text", async (ctx) => {
     return;
   }
 
-  // --- Админ: роли — добавить ---
+  // Роли: добавить
   if (prompt.startsWith(PROMPT_ADM_ADD)) {
     if (!(await requireRole(ctx, ["admin"]))) return;
     const parts = (ctx.message.text || "").trim().split(/\s+/);
@@ -345,7 +339,7 @@ BOT.on("text", async (ctx) => {
     return ctx.reply(`Готово. Назначено: ${who} — ${role}`);
   }
 
-  // --- Админ: роли — снять ---
+  // Роли: снять
   if (prompt.startsWith(PROMPT_ADM_DEL)) {
     if (!(await requireRole(ctx, ["admin"]))) return;
     const who = (ctx.message.text || "").trim().replace(/^@/, "");
@@ -363,7 +357,7 @@ BOT.on("text", async (ctx) => {
   }
 });
 
-// Рафлы (список)
+/** ===================== Raffles ===================== */
 BOT.hears("🎯 Рафлы", async (ctx) => {
   const { data: raffles } = await sb
     .from("raffles")
@@ -387,7 +381,6 @@ BOT.hears("🎯 Рафлы", async (ctx) => {
   }
 });
 
-// Участие
 BOT.action(/join_(.+)/, async (ctx) => {
   const raffleId = ctx.match[1];
   const user = ctx.from;
@@ -427,7 +420,9 @@ BOT.action(/join_(.+)/, async (ctx) => {
 
     await ctx.answerCbQuery("🎉 Ты выиграл!");
     await ctx.reply(
-      `🏆 Поздравляем, ${html(user.first_name || "участник")}!\nТы стал победителем дропа <b>${html(r.title)}</b> 🎯`,
+      `🏆 Поздравляем, ${html(user.first_name || "участник")}!\nТы стал победителем дропа <b>${html(
+        raffle.title
+      )}</b> 🎯`,
       { parse_mode: "HTML" }
     );
 
@@ -438,7 +433,7 @@ BOT.action(/join_(.+)/, async (ctx) => {
       if (process.env.CHAT_ID) {
         await BOT.telegram.sendMessage(
           process.env.CHAT_ID,
-          `🎯 Дроп <b>${html(r.title)}</b> завершён!\nПобедителей: ${r.winners_count}`,
+          `🎯 Дроп <b>${html(raffle.title)}</b> завершён!\nПобедителей: ${raffle.winners_count}`,
           { parse_mode: "HTML" }
         );
       }
@@ -449,18 +444,9 @@ BOT.action(/join_(.+)/, async (ctx) => {
   }
 });
 
-// Настройки
-BOT.hears("⚙️ Настройки", async (ctx) => {
-  const km = phoneKeyboardMarkup();
-  const mm = mainMenuMarkup();
-  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", { reply_markup: km.reply_markup });
-  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", { reply_markup: mm.reply_markup });
-});
-
-/** ===================== Admin panel (buttons) ===================== */
-BOT.command("admin", async (ctx) => {
+/** ===================== Admin panel ===================== */
+async function openAdminPanel(ctx) {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
-
   const rows = [
     [ Markup.button.callback("➕ Код для вещи", "ADM_MINT_ONE"),
       Markup.button.callback("📦 Партия кодов", "ADM_MINT_BATCH") ],
@@ -474,9 +460,11 @@ BOT.command("admin", async (ctx) => {
     ]);
     rows.push([Markup.button.callback("📋 Роли: список", "ADM_ROLE_LIST")]);
   }
-  const kb = Markup.inlineKeyboard(rows);
-  await ctx.reply("👑 Админ-панель", { reply_markup: kb.reply_markup });
-});
+  await ctx.reply("👑 Админ-панель", { reply_markup: Markup.inlineKeyboard(rows).reply_markup });
+}
+
+BOT.command("admin", async (ctx) => openAdminPanel(ctx));
+BOT.hears(/^\/admin(@\w+)?$/i, async (ctx) => openAdminPanel(ctx));
 
 BOT.action("ADM_MINT_ONE", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
@@ -499,7 +487,6 @@ BOT.action("ADM_FINISH_DROP", async (ctx) => {
   await ctx.reply("Скопируйте и заполните:\n/finish <raffle_uuid>");
 });
 
-// роли (только admin)
 BOT.action("ADM_ROLE_ADD", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   await ctx.answerCbQuery();
@@ -524,7 +511,7 @@ BOT.action("ADM_ROLE_LIST", async (ctx) => {
   await ctx.reply(`📋 Роли:\n${lines.join("\n")}`);
 });
 
-/** ===================== Admin: /adddrop /finish ===================== */
+/** ===================== Admin commands ===================== */
 BOT.command("adddrop", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   const raw = ctx.message.text.replace(/^\/adddrop\s*/i, "");
@@ -573,13 +560,41 @@ BOT.command("finish", async (ctx) => {
   }
 });
 
-/** ===================== Vercel webhook ===================== */
+/** ===================== Settings ===================== */
+BOT.hears("⚙️ Настройки", async (ctx) => {
+  const km = phoneKeyboardMarkup();
+  const mm = mainMenuMarkup();
+  await ctx.reply("Если нужно обновить номер — нажми кнопку ниже 👇", { reply_markup: km.reply_markup });
+  return ctx.reply("Настройки:\n— язык: auto\n— уведомления: включены 🔔", { reply_markup: mm.reply_markup });
+});
+
+/** ===================== Webhook handler ===================== */
 export default async function handler(req, res) {
   try {
     const secret = req.query?.secret;
     if (secret !== process.env.WEBHOOK_SECRET) {
       return res.status(401).json({ ok: false });
     }
+
+    // быстрый самотест через GET (опционально):
+    // /api/telegram?secret=...&test=simulate&chat_id=<YOUR_ID>
+    if (req.method === "GET" && req.query?.test === "simulate") {
+      const chatId = Number(req.query.chat_id);
+      if (chatId) {
+        await BOT.handleUpdate({
+          update_id: Date.now(),
+          message: {
+            message_id: 1,
+            date: Math.floor(Date.now() / 1000),
+            text: "/ping",
+            chat: { id: chatId, type: "private" },
+            from: { id: chatId, is_bot: false, first_name: "Test" },
+          },
+        });
+      }
+      return res.json({ ok: true, simulated: true });
+    }
+
     await BOT.handleUpdate(req.body);
     return res.json({ ok: true });
   } catch (e) {
