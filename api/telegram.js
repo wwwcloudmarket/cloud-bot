@@ -454,7 +454,9 @@ BOT.hears("⚙️ Настройки", async (ctx) => {
 /** ===================== Admin Panel (кнопки) ===================== */
 
 BOT.command("admin", async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
+  if (!(await requireRole(ctx, ["admin","manager"]))) return; // <- в этом случае бот пишет "Доступ только для админов."
+  // ... тут рисуем панель
+});
 
   const rows = [
     [ Markup.button.callback("➕ Код для вещи", "ADM_MINT_ONE"),
