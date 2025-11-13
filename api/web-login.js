@@ -26,10 +26,7 @@ function verifyTelegramInitData(data) {
     }
   }
 
-  const secret = crypto
-    .createHash("sha256")
-    .update(BOT_TOKEN)
-    .digest();
+  const secret = crypto.createHash("sha256").update(BOT_TOKEN).digest();
 
   const checkString = Object.keys(rest)
     .sort()
@@ -68,10 +65,7 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "content-type"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 }
 
@@ -119,7 +113,6 @@ export default async function handler(req, res) {
         photo_url: data.photo_url || null,
         lang_code: data.language_code || null,
       },
-      // если у тебя в Supabase стоит уникальный индекс по tg_user_id — можно явно указать onConflict
       { onConflict: "tg_user_id" }
     );
 
@@ -129,22 +122,25 @@ export default async function handler(req, res) {
     }
 
     // создаём сессию (cm_session)
-    const cookieVal = signSession({
+    const sessionPayload = {
       uid: tgId,
       username: data.username || null,
       first_name: data.first_name || null,
-    });
+    };
 
+    const cookieVal = signSession(sessionPayload);
+
+    // host-only cookie для домена API (Vercel-домен)
     res.setHeader(
       "Set-Cookie",
-      [
-        // host-only cookie для домена API (Vercel-домен)
-        `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; Secure`,
-      ]
+      `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; Secure`
     );
 
-    // редирект на страницу личного кабинета на Тильде/сайте
-    res.writeHead(302, { Location: LK_URL });
+    // РЕДИРЕКТ НА ЛК С ТОКЕНОМ В QUERY (?cm_token=...)
+    const url = new URL(LK_URL);
+    url.searchParams.set("cm_token", cookieVal);
+
+    res.writeHead(302, { Location: url.toString() });
     res.end();
   } catch (e) {
     console.error("web-login error:", e);
