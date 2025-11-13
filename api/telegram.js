@@ -389,40 +389,39 @@ BOT.hears("👤 Мой профиль", async (ctx) => {
 /** ===================== My Items (claimed by user) ===================== */
 async function showMyItems(ctx) {
   try {
- // 1) берём вещи, реально привязанные к пользователю
-const { data: items, error } = await sb
-  .from("item_instances")
-  .select("id, product_id, size, serial, claimed_at, status")
-  .eq("claimed_by_tg_id", ctx.from.id)
-  .eq("status", "claimed")
-  .order("claimed_at", { ascending: false })
-  .limit(50);
+    const { data: items, error } = await sb
+      .from("item_instances")
+      .select("id, product_id, size, serial, claimed_at, status")
+      .eq("claimed_by_tg_id", ctx.from.id)
+      .eq("status", "claimed")
+      .order("claimed_at", { ascending: false })
+      .limit(50);
+    if (error) throw error;
 
-if (error) throw error;
-
-// 2) тянем названия продуктов строго из выбранного поля
-let titles = new Map();
-if (items?.length) {
-  const ids = [...new Set(items.map(i => i.product_id).filter(Boolean))];
-  if (ids.length) {
-    const { data: prods } = await sb
-      .from("products")
-      .select(`id, ${PRODUCT_NAME_FIELD}, title, name, sku`)
-      .in("id", ids);
-    for (const p of (prods || [])) {
-      titles.set(p.id, productDisplayName(p));
+    // карта product_id -> title
+    const titles = new Map();
+    if (items?.length) {
+      const ids = [...new Set(items.map(i => i.product_id).filter(Boolean))];
+      if (ids.length) {
+        const { data: prods, error: perr } = await sb
+          .from("products")
+          .select("id, title")       // <-- только title
+          .in("id", ids);
+        if (perr) throw perr;
+        for (const p of (prods || [])) {
+          const t = (p?.title && String(p.title).trim()) || null;
+          if (t) titles.set(p.id, t);
+        }
+      }
     }
-  }
-}
 
-const list = (items?.length)
-  ? items.map(r => {
-      const name = titles.get(r.product_id) || `Product ${String(r.product_id).slice(0,8)}…`;
-      const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
-      // Итоговая строка — теперь точно будет вида "T-Shirt basic logo L #1 — 12.11.2025"
-      return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
-    }).join("\n")
-  : "Пока пусто.";
+    const list = (items?.length)
+      ? items.map(r => {
+          const name = titles.get(r.product_id) || `Product ${String(r.product_id).slice(0,8)}…`;
+          const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
+          return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
+        }).join("\n")
+      : "Пока пусто.";
 
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")],
