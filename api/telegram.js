@@ -389,6 +389,7 @@ BOT.hears("👤 Мой профиль", async (ctx) => {
 /** ===================== My Items (claimed by user) ===================== */
 async function showMyItems(ctx) {
   try {
+    // 1) берём вещи, реально привязанные к пользователю
     const { data: items, error } = await sb
       .from("item_instances")
       .select("id, product_id, size, serial, claimed_at, status")
@@ -399,23 +400,28 @@ async function showMyItems(ctx) {
 
     if (error) throw error;
 
-    let list = "Пока пусто.";
+    // 2) тянем названия продуктов по их id (без FK-зависимости)
+    let titles = new Map();
     if (items?.length) {
-      const ids = [...new Set(items.map(i => i.product_id))];
-      let titles = new Map();
+      const ids = [...new Set(items.map(i => i.product_id).filter(Boolean))];
       if (ids.length) {
-        const { data: prods } = await sb
+        const { data: prods, error: perr } = await sb
           .from("products")
           .select("id, title, name, sku")
           .in("id", ids);
-        for (const p of (prods || [])) titles.set(p.id, (p.title || p.name || p.sku || p.id));
+        if (!perr && prods?.length) {
+          for (const p of prods) titles.set(p.id, productTitle(p));
+        }
       }
-      list = items.map(r => {
-        const name = titles.get(r.product_id) || r.product_id;
-        const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
-        return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
-      }).join("\n");
     }
+
+    const list = (items?.length)
+      ? items.map(r => {
+          const name = titles.get(r.product_id) || `Product ${String(r.product_id).slice(0,8)}…`;
+          const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
+          return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
+        }).join("\n")
+      : "Пока пусто.";
 
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")],
