@@ -5,10 +5,10 @@ import { sb } from "../lib/db.js";
 const WEB_JWT_SECRET = process.env.WEB_JWT_SECRET;
 const TILDA_ORIGIN = process.env.TILDA_ORIGIN || "https://wwwcloudmarket.ru";
 
-function verifySession(cookieVal) {
-  if (!cookieVal || !WEB_JWT_SECRET) return null;
+function verifySession(token) {
+  if (!token || !WEB_JWT_SECRET) return null;
 
-  const [json, sig] = cookieVal.split(".");
+  const [json, sig] = token.split(".");
   if (!json || !sig) return null;
 
   const check = crypto
@@ -35,7 +35,10 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Headers", "content-type");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "content-type,authorization"
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 }
 
@@ -49,16 +52,31 @@ export default async function handler(req, res) {
 
   try {
     if (!WEB_JWT_SECRET) {
-      return res.status(500).json({ ok: false, error: "server misconfigured" });
+      return res
+        .status(500)
+        .json({ ok: false, error: "server misconfigured" });
     }
 
+    // --- 1) токен из cookie ---
     const rawCookie = req.headers.cookie || "";
     const m = rawCookie.match(/(?:^|;\s*)cm_session=([^;]+)/);
-    const token = m ? m[1] : null;
+    const cookieToken = m ? m[1] : null;
+
+    // --- 2) токен из Authorization: Bearer xxx ---
+    const authHeader = req.headers.authorization || "";
+    const mAuth = authHeader.match(/^Bearer (.+)$/i);
+    const headerToken = mAuth ? mAuth[1] : null;
+
+    // --- 3) токен из query (?cm_token=... | ?token=...) ---
+    const urlToken =
+      (req.query && (req.query.cm_token || req.query.token)) || null;
+
+    const token = cookieToken || headerToken || urlToken;
 
     const sess = verifySession(token);
     if (!sess?.uid) {
-      return res.status(401).json({ ok: false });
+      // не авторизован
+      return res.json({ ok: false });
     }
 
     // 1) Профиль
@@ -71,7 +89,7 @@ export default async function handler(req, res) {
       .single();
 
     if (userErr || !user) {
-      return res.status(401).json({ ok: false });
+      return res.json({ ok: false });
     }
 
     // 2) Победы (winners + raffles)
@@ -104,11 +122,13 @@ export default async function handler(req, res) {
     // 3) Заказы (orders)
     const { data: orders = [] } = await sb
       .from("orders")
-      .select("id, order_number, created_at, total_price, currency, title, size")
+      .select(
+        "id, order_number, created_at, total_price, currency, title, size"
+      )
       .eq("tg_user_id", sess.uid)
       .order("created_at", { ascending: false });
 
-    // 4) Мои вещи (можно делать отдельную таблицу, или derived из wins+orders)
+    // 4) Мои вещи
     const { data: items = [] } = await sb
       .from("owned_items")
       .select("id, title, size, color, acquired_at, source, image_url")
