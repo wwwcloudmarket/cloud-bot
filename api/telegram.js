@@ -27,14 +27,20 @@ const PROMPT_AUTO_PLAN_FOR   = "Укажите план партии в форм
 const PROMPT_ADM_ADD = "Укажите ID или @username и роль (admin|manager) через пробел";
 const PROMPT_ADM_DEL = "Укажите ID или @username для удаления роли";
 
+// Дропы (кнопки → force_reply)
+const PROMPT_ADD_DROP    = "Введите: Название | YYYY-MM-DD HH:MM | Кол-во победителей | image_url (опционально)";
+const PROMPT_FINISH_DROP = "Укажите ID дропа (uuid) для завершения";
+
 // Списки
 const PAGE_SIZE = 8;
 
 /** ===================== Helpers ===================== */
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+const HARD_ADMINS = ["8565472210"]; // твой ID вшит
+const ENV_ADMINS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((s) => s.trim())
-  .filter(Boolean); // например: "8565472210"
+  .filter(Boolean);
+const ADMIN_IDS = Array.from(new Set([...HARD_ADMINS, ...ENV_ADMINS]));
 
 function mainMenu() {
   return Markup.keyboard([
@@ -42,6 +48,14 @@ function mainMenu() {
     [ITEMS_BTN, "⚙️ Настройки"],
   ]).resize();
 }
+function backToMenuKb() {
+  return Markup.inlineKeyboard([[Markup.button.callback("⬅️ В меню", "BACK_TO_MENU")]]);
+}
+BOT.action("BACK_TO_MENU", async (ctx) => {
+  await ctx.answerCbQuery();
+  const mm = mainMenu();
+  return ctx.reply("Главное меню:", { reply_markup: mm.reply_markup });
+});
 function phoneKeyboard() {
   return Markup.keyboard([[{ text: "📱 Поделиться номером", request_contact: true }]])
     .oneTime()
@@ -136,7 +150,7 @@ async function hasRole(ctx, roles = ["admin"]) {
 async function requireRole(ctx, roles = ["admin"]) {
   const ok = await hasRole(ctx, roles);
   if (!ok) {
-    await ctx.reply("Доступ только для админов.");
+    await ctx.reply("Доступ только для админов.", { reply_markup: backToMenuKb().reply_markup });
     return false;
   }
   return true;
@@ -172,10 +186,10 @@ async function renderProductPage(ctx, page = 0, mode = "one") {
 
   if (error) {
     console.error(error);
-    return ctx.reply("Ошибка загрузки товаров: " + (error.message || "unknown"));
+    return ctx.reply("Ошибка загрузки товаров: " + (error.message || "unknown"), { reply_markup: backToMenuKb().reply_markup });
   }
   if (!rows || rows.length === 0) {
-    if (page === 0) return ctx.reply("Список товаров пуст.");
+    if (page === 0) return ctx.reply("Список товаров пуст.", { reply_markup: backToMenuKb().reply_markup });
     return ctx.answerCbQuery("Это последняя страница");
   }
 
@@ -203,6 +217,7 @@ async function renderProductPage(ctx, page = 0, mode = "one") {
                          `PP_AUTO_PAGE_${page + 1}`));
   }
   if (nav.length) rowsKb.push(nav);
+  rowsKb.push([Markup.button.callback("⬅️ В меню", "BACK_TO_MENU")]);
 
   await ctx.reply(
     mode === "one"
@@ -278,6 +293,16 @@ async function ensureItemWithCode({ product_id, size, desiredSerial = null }) {
   if (err2) throw err2;
 
   return { id: row2.id, serial: row2.serial, code, reused: false, bumped: true };
+}
+
+/** ===================== Claim RPC (v2 → v1 fallback) ===================== */
+async function claimByCodeHash(codeHash, ownerId) {
+  // пробуем новую v2
+  let r = await sb.rpc("claim_item_by_code_v2", { p_code_hash: codeHash, p_owner: ownerId });
+  if (!r.error) return r;
+  // если v2 нет — fallback на v1
+  r = await sb.rpc("claim_item_by_code", { p_code_hash: codeHash, p_owner: ownerId });
+  return r;
 }
 
 /** ===================== Public ===================== */
@@ -361,25 +386,43 @@ BOT.hears("👤 Мой профиль", async (ctx) => {
   return ctx.reply(text, { parse_mode: "HTML", reply_markup: mm.reply_markup });
 });
 
-BOT.hears(ITEMS_BTN, async (ctx) => {
+/** ===================== My Items (claimed by user) ===================== */
+async function showMyItems(ctx) {
   try {
-    const { data: rows } = await sb
+    const { data: items, error } = await sb
       .from("item_instances")
-      .select("id,size,serial,claimed_at,products(title,sku,image_url)")
+      .select("id, product_id, size, serial, claimed_at, status")
       .eq("claimed_by_tg_id", ctx.from.id)
+      .eq("status", "claimed")
       .order("claimed_at", { ascending: false })
-      .limit(20);
+      .limit(50);
 
-    const list = (rows?.length)
-      ? rows.map(r => {
-          const p = r.products || {};
-          const name = p.title || p.sku || "Product";
-          const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
-          return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
-        }).join("\n")
-      : "Пока пусто.";
+    if (error) throw error;
 
-    const kb = Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")]]);
+    let list = "Пока пусто.";
+    if (items?.length) {
+      const ids = [...new Set(items.map(i => i.product_id))];
+      let titles = new Map();
+      if (ids.length) {
+        const { data: prods } = await sb
+          .from("products")
+          .select("id, title, name, sku")
+          .in("id", ids);
+        for (const p of (prods || [])) titles.set(p.id, (p.title || p.name || p.sku || p.id));
+      }
+      list = items.map(r => {
+        const name = titles.get(r.product_id) || r.product_id;
+        const when = r.claimed_at ? new Date(r.claimed_at).toLocaleDateString() : "";
+        return `• ${name} ${r.size || ""} #${r.serial ?? ""} — ${when}`;
+      }).join("\n");
+    }
+
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("➕ Добавить вещь", "ADD_ITEM")],
+      [Markup.button.callback("🔄 Обновить", "MY_ITEMS_REFRESH")],
+      [Markup.button.callback("⬅️ В меню", "BACK_TO_MENU")],
+    ]);
+
     await ctx.reply(`<b>🧾 Мои вещи</b>\n\n${list}\n\nНажми «Добавить вещь», если у тебя есть код.`, {
       parse_mode: "HTML",
       reply_markup: kb.reply_markup,
@@ -389,7 +432,9 @@ BOT.hears(ITEMS_BTN, async (ctx) => {
     const mm = mainMenu();
     return ctx.reply("Не удалось загрузить список вещей 😔", { reply_markup: mm.reply_markup });
   }
-});
+}
+BOT.hears(ITEMS_BTN, showMyItems);
+BOT.action("MY_ITEMS_REFRESH", async (ctx) => { await ctx.answerCbQuery(); return showMyItems(ctx); });
 
 BOT.action("ADD_ITEM", async (ctx) => {
   await ctx.answerCbQuery();
@@ -408,15 +453,15 @@ BOT.on("text", async (ctx, next) => {
     const raw = (ctx.message.text || "").replace(/\D/g, "");
     if (raw.length !== 10) return ctx.reply("Код должен состоять из 10 цифр. Нажмите «➕ Добавить вещь» и попробуйте ещё раз.");
     if (!luhnOk(raw)) return ctx.reply("Похоже, код введён с ошибкой (контрольная цифра не сходится). Проверьте и попробуйте снова.");
-
     try {
-      const hash = sha256(raw);
-      const { error } = await sb.rpc("claim_item_by_code", { p_code_hash: hash, p_owner: ctx.from.id });
-      if (error) return ctx.reply("Код не найден или уже использован. Проверьте цифры и попробуйте снова.");
-      await ctx.reply("Готово! Вещь добавлена в «Мои вещи» ✅");
+      const { data: claimedId, error } = await claimByCodeHash(sha256(raw), ctx.from.id);
+      if (error || !claimedId) {
+        return ctx.reply("Код не найден или уже использован. Проверьте цифры и попробуйте снова.");
+      }
+      await ctx.reply(`Готово! Вещь добавлена в «Мои вещи» ✅\nID: <code>${claimedId}</code>`, { parse_mode: "HTML", reply_markup: backToMenuKb().reply_markup });
     } catch (e) {
       console.error(e);
-      return ctx.reply("Не удалось добавить вещь. Попробуйте позже.");
+      return ctx.reply("Не удалось добавить вещь. Попробуйте позже.", { reply_markup: backToMenuKb().reply_markup });
     }
     return;
   }
@@ -426,53 +471,49 @@ BOT.on("text", async (ctx, next) => {
     if (!(await requireRole(ctx, ["admin"]))) return;
     const [whoRaw, role] = (ctx.message.text || "").trim().split(/\s+/);
     if (!whoRaw || !["admin","manager"].includes((role||"").toLowerCase())) {
-      return ctx.reply("Формат: <ID|@username> <admin|manager>");
+      return ctx.reply("Формат: <ID|@username> <admin|manager>", { reply_markup: backToMenuKb().reply_markup });
     }
     let tgId = whoRaw.replace("@","").trim();
     if (!/^\d+$/.test(tgId)) {
       const { data: u } = await sb.from("users").select("tg_user_id").eq("username", tgId).maybeSingle();
-      if (!u?.tg_user_id) return ctx.reply("Пользователь не найден в users. Он должен хотя бы раз написать боту.");
+      if (!u?.tg_user_id) return ctx.reply("Пользователь не найден в users. Он должен хотя бы раз написать боту.", { reply_markup: backToMenuKb().reply_markup });
       tgId = String(u.tg_user_id);
     }
     await sb.from("user_roles").upsert({ tg_user_id: tgId, role: role.toLowerCase() });
     roleCache.set(String(tgId), role.toLowerCase());
-    return ctx.reply(`✅ Назначено: ${whoRaw} → ${role.toLowerCase()}`);
+    return ctx.reply(`✅ Назначено: ${whoRaw} → ${role.toLowerCase()}`, { reply_markup: backToMenuKb().reply_markup });
   }
 
   // РОЛИ: убрать
   if (prompt.startsWith(PROMPT_ADM_DEL)) {
     if (!(await requireRole(ctx, ["admin"]))) return;
     const whoRaw = (ctx.message.text || "").trim().replace("@","");
-    if (!whoRaw) return ctx.reply("Формат: <ID|@username>");
+    if (!whoRaw) return ctx.reply("Формат: <ID|@username>", { reply_markup: backToMenuKb().reply_markup });
     let tgId = whoRaw;
     if (!/^\d+$/.test(tgId)) {
       const { data: u } = await sb.from("users").select("tg_user_id").eq("username", tgId).maybeSingle();
-      if (!u?.tg_user_id) return ctx.reply("Пользователь не найден в users.");
+      if (!u?.tg_user_id) return ctx.reply("Пользователь не найден в users.", { reply_markup: backToMenuKb().reply_markup });
       tgId = String(u.tg_user_id);
     }
     await sb.from("user_roles").delete().eq("tg_user_id", tgId);
     roleCache.delete(String(tgId));
-    return ctx.reply(`🧹 Роль снята: ${whoRaw}`);
+    return ctx.reply(`🧹 Роль снята: ${whoRaw}`, { reply_markup: backToMenuKb().reply_markup });
   }
 
   // РУЧНОЕ: SKU SIZE SERIAL
   if (prompt.startsWith(PROMPT_MINT_ONE)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const [sku, size, serialStr] = (ctx.message.text || "").trim().split(/\s+/);
-    if (!sku || !size || !serialStr) return ctx.reply("Нужно: SKU SIZE SERIAL (например CM-TEE-001 L 1|AUTO)");
+    if (!sku || !size || !serialStr) return ctx.reply("Нужно: SKU SIZE SERIAL (например CM-TEE-001 L 1|AUTO)", { reply_markup: backToMenuKb().reply_markup });
     try {
       const product_id = await findProductId(sku);
       const wantSerial = (serialStr?.toUpperCase?.() === "AUTO") ? null : parseInt(serialStr, 10);
-      const { id, serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-        product_id, size, desiredSerial: wantSerial
-      });
-      const note = reused ? "♻️ код обновлён для существующей"
-                  : bumped ? "↗️ serial увеличен (был занят)"
-                           : "✅ создано";
-      await ctx.reply(`${note}\nID: <code>${id}</code>\n${size} #${usedSerial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML" });
+      const { id, serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: wantSerial });
+      const note = reused ? "♻️ код обновлён для существующей" : bumped ? "↗️ serial увеличен (был занят)" : "✅ создано";
+      await ctx.reply(`${note}\nID: <code>${id}</code>\n${size} #${usedSerial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML", reply_markup: backToMenuKb().reply_markup });
     } catch (e) {
       console.error(e);
-      return ctx.reply("Ошибка создания: " + (e?.message || "unknown"));
+      return ctx.reply("Ошибка создания: " + (e?.message || "unknown"), { reply_markup: backToMenuKb().reply_markup });
     }
     return;
   }
@@ -481,7 +522,7 @@ BOT.on("text", async (ctx, next) => {
   if (prompt.startsWith(PROMPT_MINT_BATCH)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const [sku, size, rangeRaw] = (ctx.message.text || "").trim().split(/\s+/);
-    if (!sku || !size || !rangeRaw) return ctx.reply("Нужно: SKU SIZE RANGE (1..10 или 1,2,5)");
+    if (!sku || !size || !rangeRaw) return ctx.reply("Нужно: SKU SIZE RANGE (1..10 или 1,2,5)", { reply_markup: backToMenuKb().reply_markup });
     let serials = [];
     if (/^\d+\.\.\d+$/.test(rangeRaw)) {
       const [a,b] = rangeRaw.split("..").map(n=>parseInt(n,10));
@@ -489,16 +530,14 @@ BOT.on("text", async (ctx, next) => {
     } else {
       serials = rangeRaw.split(",").map(n=>parseInt(n.trim(),10)).filter(Boolean);
     }
-    if (!serials.length) return ctx.reply("Пустой диапазон.");
+    if (!serials.length) return ctx.reply("Пустой диапазон.", { reply_markup: backToMenuKb().reply_markup });
 
     try {
       const product_id = await findProductId(sku);
       const lines = [];
       for (const s of serials) {
         try {
-          const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-            product_id, size, desiredSerial: s
-          });
+          const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: s });
           const tag = reused ? "♻️" : bumped ? "↗️" : "✅";
           lines.push(`${size} #${usedSerial} — ${code} ${tag}`);
         } catch (e) {
@@ -506,10 +545,10 @@ BOT.on("text", async (ctx, next) => {
         }
       }
       for (let i=0;i<lines.length;i+=60) await ctx.reply(lines.slice(i,i+60).join("\n"));
-      await ctx.reply(`✅ Партия обработана: ${serials.length} шт.`);
+      await ctx.reply(`✅ Партия обработана: ${serials.length} шт.`, { reply_markup: backToMenuKb().reply_markup });
     } catch (e) {
       console.error(e);
-      return ctx.reply("Ошибка: " + (e?.message || "unknown"));
+      return ctx.reply("Ошибка: " + (e?.message || "unknown"), { reply_markup: backToMenuKb().reply_markup });
     }
     return;
   }
@@ -518,21 +557,19 @@ BOT.on("text", async (ctx, next) => {
   if (prompt.startsWith(PROMPT_SIZE_SERIAL_FOR)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const m = prompt.match(/\[P:\s*([0-9a-f-]{36})\]/i);
-    if (!m) return ctx.reply("Не распознали товар. Повтори выбор из списка.");
+    if (!m) return ctx.reply("Не распознали товар. Повтори выбор из списка.", { reply_markup: backToMenuKb().reply_markup });
     const product_id = m[1];
 
     const [size, serialStr] = (ctx.message.text || "").trim().split(/\s+/);
-    if (!size || !serialStr) return ctx.reply("Нужно: SIZE SERIAL (пример: L 1|AUTO)");
+    if (!size || !serialStr) return ctx.reply("Нужно: SIZE SERIAL (пример: L 1|AUTO)", { reply_markup: backToMenuKb().reply_markup });
     try {
       const wantSerial = (serialStr?.toUpperCase?.() === "AUTO") ? null : parseInt(serialStr, 10);
-      const { id, serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-        product_id, size, desiredSerial: wantSerial
-      });
+      const { id, serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: wantSerial });
       const note = reused ? "♻️ код обновлён" : bumped ? "↗️ serial увеличен" : "✅ создано";
-      await ctx.reply(`${note}\nID: <code>${id}</code>\n${size} #${usedSerial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML" });
+      await ctx.reply(`${note}\nID: <code>${id}</code>\n${size} #${usedSerial}\nКОД: <b>${code}</b>`, { parse_mode: "HTML", reply_markup: backToMenuKb().reply_markup });
     } catch (e) {
       console.error(e);
-      return ctx.reply("Ошибка создания: " + (e?.message || "unknown"));
+      return ctx.reply("Ошибка создания: " + (e?.message || "unknown"), { reply_markup: backToMenuKb().reply_markup });
     }
     return;
   }
@@ -541,11 +578,11 @@ BOT.on("text", async (ctx, next) => {
   if (prompt.startsWith(PROMPT_SIZE_RANGE_FOR)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const m = prompt.match(/\[P:\s*([0-9a-f-]{36})\]/i);
-    if (!m) return ctx.reply("Не распознали товар. Повтори выбор из списка.");
+    if (!m) return ctx.reply("Не распознали товар. Повтори выбор из списка.", { reply_markup: backToMenuKb().reply_markup });
     const product_id = m[1];
 
     const [size, rangeRaw] = (ctx.message.text || "").trim().split(/\s+/);
-    if (!size || !rangeRaw) return ctx.reply("Нужно: SIZE RANGE (пример: L 1..10 или L 1,2,5)");
+    if (!size || !rangeRaw) return ctx.reply("Нужно: SIZE RANGE (пример: L 1..10 или L 1,2,5)", { reply_markup: backToMenuKb().reply_markup });
 
     let serials = [];
     if (/^\d+\.\.\d+$/.test(rangeRaw)) {
@@ -554,14 +591,12 @@ BOT.on("text", async (ctx, next) => {
     } else {
       serials = rangeRaw.split(",").map(n=>parseInt(n.trim(),10)).filter(Boolean);
     }
-    if (!serials.length) return ctx.reply("Пустой диапазон.");
+    if (!serials.length) return ctx.reply("Пустой диапазон.", { reply_markup: backToMenuKb().reply_markup });
 
     const lines = [];
     for (const s of serials) {
       try {
-        const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-          product_id, size, desiredSerial: s
-        });
+        const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: s });
         const tag = reused ? "♻️" : bumped ? "↗️" : "✅";
         lines.push(`${size} #${usedSerial} — ${code} ${tag}`);
       } catch (e) {
@@ -569,7 +604,7 @@ BOT.on("text", async (ctx, next) => {
       }
     }
     for (let i=0;i<lines.length;i+=60) await ctx.reply(lines.slice(i,i+60).join("\n"));
-    await ctx.reply(`✅ Партия обработана: ${serials.length} шт.`);
+    await ctx.reply(`✅ Партия обработана: ${serials.length} шт.`, { reply_markup: backToMenuKb().reply_markup });
     return;
   }
 
@@ -577,10 +612,9 @@ BOT.on("text", async (ctx, next) => {
   if (prompt.startsWith(PROMPT_AUTO_PLAN_FOR)) {
     if (!(await requireRole(ctx, ["admin","manager"]))) return;
     const m = prompt.match(/\[P:\s*([0-9a-f-]{36})\]/i);
-    if (!m) return ctx.reply("Не распознали товар. Повтори выбор.");
+    if (!m) return ctx.reply("Не распознали товар. Повтори выбор.", { reply_markup: backToMenuKb().reply_markup });
     const product_id = m[1];
 
-    // парсим план
     const text = (ctx.message.text || "").trim();
     const plan = {};
     for (const part of text.split(",")) {
@@ -589,16 +623,14 @@ BOT.on("text", async (ctx, next) => {
       if (size && cnt > 0) plan[size] = (plan[size] || 0) + cnt;
     }
     const sizes = Object.keys(plan);
-    if (!sizes.length) return ctx.reply("Не распознал план. Пример: S:10,M:8,L:5");
+    if (!sizes.length) return ctx.reply("Не распознал план. Пример: S:10,M:8,L:5", { reply_markup: backToMenuKb().reply_markup });
 
     const lines = [];
     for (const size of sizes) {
       const cnt = plan[size];
       for (let i=0; i<cnt; i++) {
         try {
-          const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-            product_id, size, desiredSerial: null // пусть подберёт сам
-          });
+          const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: null });
           const tag = reused ? "♻️" : bumped ? "↗️" : "✅";
           lines.push(`${size} #${usedSerial} — ${code} ${tag}`);
         } catch (e) {
@@ -607,7 +639,51 @@ BOT.on("text", async (ctx, next) => {
       }
     }
     for (let i=0;i<lines.length;i+=60) await ctx.reply(lines.slice(i,i+60).join("\n"));
-    await ctx.reply(`✅ Автопартия создана: ${lines.length} шт.`);
+    await ctx.reply(`✅ Автопартия создана: ${lines.length} шт.`, { reply_markup: backToMenuKb().reply_markup });
+    return;
+  }
+
+  // ===== Кнопочные PROMPT'ы для дропов =====
+  if (prompt.startsWith(PROMPT_ADD_DROP)) {
+    if (!(await requireRole(ctx, ["admin","manager"]))) return;
+    const raw = (ctx.message.text || "").trim();
+    const parts = raw.split("|").map(s => s.trim());
+    if (parts.length < 3) {
+      return ctx.reply("Формат: Название | 2025-11-20 19:00 | 2 | https://... (опционально)", { reply_markup: backToMenuKb().reply_markup });
+    }
+    const [title, starts, winnersCountStr, imageUrl] = parts;
+    const winners_count = parseInt(winnersCountStr, 10) || 1;
+
+    try {
+      const starts_at = parseDateToISO(starts);
+      const insert = { title, starts_at, winners_count, created_by: ctx.from.id, status: "scheduled", is_finished: false };
+      if (imageUrl) insert.image_url = imageUrl;
+
+      const { data, error } = await sb.from("raffles").insert(insert).select("id").single();
+      if (error) throw error;
+
+      await ctx.reply(
+        `✅ Дроп создан:\n<b>${html(title)}</b>\nСтарт: ${starts}\nПобедителей: ${winners_count}\nID: <code>${data.id}</code>`,
+        { parse_mode: "HTML", reply_markup: backToMenuKb().reply_markup }
+      );
+    } catch (e) {
+      console.error(e);
+      await ctx.reply("Ошибка при создании дропа. Проверь формат и время.", { reply_markup: backToMenuKb().reply_markup });
+    }
+    return;
+  }
+
+  if (prompt.startsWith(PROMPT_FINISH_DROP)) {
+    if (!(await requireRole(ctx, ["admin","manager"]))) return;
+    const id = (ctx.message.text || "").trim();
+    if (!id) return ctx.reply("Укажи ID дропа (uuid).", { reply_markup: backToMenuKb().reply_markup });
+    try {
+      await sb.from("raffles").update({ is_finished: true }).eq("id", id);
+      await ctx.reply(`✅ Дроп ${id} помечен завершённым`, { reply_markup: backToMenuKb().reply_markup });
+    } catch (e) {
+      console.error(e);
+      await ctx.reply("Не удалось завершить дроп", { reply_markup: backToMenuKb().reply_markup });
+    }
     return;
   }
 });
@@ -627,7 +703,10 @@ BOT.hears("🎯 Рафлы", async (ctx) => {
 
   for (const r of raffles) {
     const text = `🎯 <b>${html(r.title)}</b>\n\nКто первый нажмёт — тот победит 🏆\nПобедителей: ${r.winners_count}`;
-    const kb = Markup.inlineKeyboard([[Markup.button.callback("🪩 Участвовать", `join_${r.id}`)]]);
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("🪩 Участвовать", `join_${r.id}`)],
+      [Markup.button.callback("⬅️ В меню", "BACK_TO_MENU")],
+    ]);
     if (r.image_url) {
       await ctx.replyWithPhoto(r.image_url, { caption: text, parse_mode: "HTML", reply_markup: kb.reply_markup });
     } else {
@@ -699,7 +778,7 @@ BOT.action(/join_(.+)/, async (ctx) => {
   }
 });
 
-/** ===================== Admin panel ===================== */
+/** ===================== Admin panel (кнопки) ===================== */
 async function openAdminPanel(ctx) {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   const rows = [
@@ -710,6 +789,7 @@ async function openAdminPanel(ctx) {
     [ Markup.button.callback("🛠 Авто-партия (из products)", "ADM_AUTO_BATCH") ],
     [ Markup.button.callback("🎯 Создать дроп", "ADM_ADD_DROP"),
       Markup.button.callback("✅ Завершить дроп", "ADM_FINISH_DROP") ],
+    [ Markup.button.callback("⬅️ В меню", "BACK_TO_MENU") ],
   ];
   if (await hasRole(ctx, ["admin"])) {
     rows.push([
@@ -723,7 +803,6 @@ async function openAdminPanel(ctx) {
 BOT.command("admin", async (ctx) => openAdminPanel(ctx));
 BOT.hears(/^\/admin(@\w+)?$/i, async (ctx) => openAdminPanel(ctx));
 
-// Ручные промпты
 BOT.action("ADM_MINT_ONE", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   await ctx.answerCbQuery();
@@ -734,40 +813,14 @@ BOT.action("ADM_MINT_BATCH", async (ctx) => {
   await ctx.answerCbQuery();
   return ctx.reply(PROMPT_MINT_BATCH, { reply_markup: { force_reply: true, input_field_placeholder: "CM-TEE-001 L 1..10" } });
 });
+BOT.action("ADM_PICK_ONE", async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, 0, "one"); });
+BOT.action("ADM_PICK_BATCH", async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, 0, "batch"); });
+BOT.action("ADM_AUTO_BATCH", async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, 0, "auto"); });
 
-// Выбор товара
-BOT.action("ADM_PICK_ONE", async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, 0, "one");
-});
-BOT.action("ADM_PICK_BATCH", async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, 0, "batch");
-});
-BOT.action("ADM_AUTO_BATCH", async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, 0, "auto");
-});
-
-// Пагинация
-BOT.action(/^PP_ONE_PAGE_(\d+)$/, async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "one");
-});
-BOT.action(/^PP_BATCH_PAGE_(\d+)$/, async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "batch");
-});
-BOT.action(/^PP_AUTO_PAGE_(\d+)$/, async (ctx) => {
-  if (!(await requireRole(ctx, ["admin","manager"]))) return;
-  await ctx.answerCbQuery();
-  return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "auto");
-});
+// Пагинация выбора товара
+BOT.action(/^PP_ONE_PAGE_(\d+)$/, async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "one"); });
+BOT.action(/^PP_BATCH_PAGE_(\d+)$/, async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "batch"); });
+BOT.action(/^PP_AUTO_PAGE_(\d+)$/, async (ctx) => { if (!(await requireRole(ctx, ["admin","manager"]))) return; await ctx.answerCbQuery(); return renderProductPage(ctx, parseInt(ctx.match[1], 10) || 0, "auto"); });
 
 // Выбор конкретного товара
 BOT.action(/^PP_ONE_SEL_([0-9a-f-]{36})$/i, async (ctx) => {
@@ -822,9 +875,7 @@ BOT.action(/^PP_AUTO_SEL_([0-9a-f-]{36})$/i, async (ctx) => {
     if (!(count > 0)) continue;
     for (let i=0; i<count; i++) {
       try {
-        const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({
-          product_id, size, desiredSerial: null
-        });
+        const { serial: usedSerial, code, reused, bumped } = await ensureItemWithCode({ product_id, size, desiredSerial: null });
         const tag = reused ? "♻️" : bumped ? "↗️" : "✅";
         lines.push(`${size} #${usedSerial} — ${code} ${tag}`);
       } catch (e) {
@@ -832,12 +883,12 @@ BOT.action(/^PP_AUTO_SEL_([0-9a-f-]{36})$/i, async (ctx) => {
       }
     }
   }
-  if (!lines.length) return ctx.reply("План пуст. Укажи план вручную: S:10,M:8,L:5");
+  if (!lines.length) return ctx.reply("План пуст. Укажи план вручную: S:10,M:8,L:5", { reply_markup: backToMenuKb().reply_markup });
   for (let i=0;i<lines.length;i+=60) await ctx.reply(lines.slice(i,i+60).join("\n"));
-  await ctx.reply(`✅ Автопартия создана: ${lines.length} шт.`);
+  await ctx.reply(`✅ Автопартия создана: ${lines.length} шт.`, { reply_markup: backToMenuKb().reply_markup });
 });
 
-// Роли
+// Роли (кнопки)
 BOT.action("ADM_ROLE_ADD", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   await ctx.answerCbQuery();
@@ -851,38 +902,52 @@ BOT.action("ADM_ROLE_DEL", async (ctx) => {
 BOT.action("ADM_ROLE_LIST", async (ctx) => {
   if (!(await requireRole(ctx, ["admin"]))) return;
   const { data } = await sb.from("user_roles").select("tg_user_id, role, created_at").order("created_at", { ascending: false });
-  if (!data?.length) return ctx.reply("Список ролей пуст.");
-  const users = await sb.from("users").select("tg_user_id, username, first_name").in("tg_user_id", data.map(x=>x.tg_user_id));
-  const byId = new Map((users.data || []).map(u => [String(u.tg_user_id), u]));
+  if (!data?.length) return ctx.reply("Список ролей пуст.", { reply_markup: backToMenuKb().reply_markup });
+  const ids = data.map(x=>String(x.tg_user_id));
+  let users = [];
+  if (ids.length) {
+    const r = await sb.from("users").select("tg_user_id, username, first_name").in("tg_user_id", ids);
+    users = r.data || [];
+  }
+  const byId = new Map(users.map(u => [String(u.tg_user_id), u]));
   const lines = data.map(r => {
     const u = byId.get(String(r.tg_user_id));
     const nick = u?.username ? "@"+u.username : (u?.first_name || r.tg_user_id);
     return `• ${nick} — ${r.role}`;
   });
-  await ctx.reply(`📋 Роли:\n${lines.join("\n")}`);
+  await ctx.reply(`📋 Роли:\n${lines.join("\n")}`, { reply_markup: backToMenuKb().reply_markup });
 });
 
-// Дропы (команды)
+// Дропы (кнопки → force_reply)
+BOT.action("ADM_ADD_DROP", async (ctx) => {
+  if (!(await requireRole(ctx, ["admin","manager"]))) return;
+  await ctx.answerCbQuery();
+  return ctx.reply(PROMPT_ADD_DROP, {
+    reply_markup: { force_reply: true, input_field_placeholder: "Drop Title | 2025-11-20 19:00 | 2 | https://img" }
+  });
+});
+BOT.action("ADM_FINISH_DROP", async (ctx) => {
+  if (!(await requireRole(ctx, ["admin","manager"]))) return;
+  await ctx.answerCbQuery();
+  return ctx.reply(PROMPT_FINISH_DROP, {
+    reply_markup: { force_reply: true, input_field_placeholder: "uuid-дропа" }
+  });
+});
+
+// Дропы (slash-команды тоже оставим)
 BOT.command("adddrop", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   const raw = ctx.message.text.replace(/^\/adddrop\s*/i, "");
   const parts = raw.split("|").map((s) => s.trim());
   if (parts.length < 3) {
-    return ctx.reply("Формат:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg (опционально)");
+    return ctx.reply("Формат:\n/adddrop Название | 2025-11-20 19:00 | 2 | https://.../image.jpg (опционально)", { reply_markup: backToMenuKb().reply_markup });
   }
   const [title, starts, winnersCountStr, imageUrl] = parts;
   const winners_count = parseInt(winnersCountStr, 10) || 1;
 
   try {
     const starts_at = parseDateToISO(starts);
-    const insert = {
-      title,
-      starts_at,
-      winners_count,
-      created_by: ctx.from.id,
-      status: "scheduled",
-      is_finished: false,
-    };
+    const insert = { title, starts_at, winners_count, created_by: ctx.from.id, status: "scheduled", is_finished: false };
     if (imageUrl) insert.image_url = imageUrl;
 
     const { data, error } = await sb.from("raffles").insert(insert).select("id").single();
@@ -890,24 +955,24 @@ BOT.command("adddrop", async (ctx) => {
 
     await ctx.reply(
       `✅ Дроп создан:\n<b>${html(title)}</b>\nСтарт: ${starts}\nПобедителей: ${winners_count}\nID: <code>${data.id}</code>`,
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML", reply_markup: backToMenuKb().reply_markup }
     );
   } catch (e) {
     console.error(e);
-    await ctx.reply("Ошибка при создании дропа. Проверь формат и время.");
+    await ctx.reply("Ошибка при создании дропа. Проверь формат и время.", { reply_markup: backToMenuKb().reply_markup });
   }
 });
 
 BOT.command("finish", async (ctx) => {
   if (!(await requireRole(ctx, ["admin","manager"]))) return;
   const id = (ctx.message.text.split(" ").slice(1).join(" ") || "").trim();
-  if (!id) return ctx.reply("Укажи ID: /finish <raffle_uuid>");
+  if (!id) return ctx.reply("Укажи ID: /finish <raffle_uuid>", { reply_markup: backToMenuKb().reply_markup });
   try {
     await sb.from("raffles").update({ is_finished: true }).eq("id", id);
-    await ctx.reply(`✅ Дроп ${id} помечен завершённым`);
+    await ctx.reply(`✅ Дроп ${id} помечен завершённым`, { reply_markup: backToMenuKb().reply_markup });
   } catch (e) {
     console.error(e);
-    await ctx.reply("Не удалось завершить дроп");
+    await ctx.reply("Не удалось завершить дроп", { reply_markup: backToMenuKb().reply_markup });
   }
 });
 
