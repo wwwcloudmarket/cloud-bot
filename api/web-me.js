@@ -57,25 +57,24 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "server misconfigured" });
     }
 
-    // --- 1) токен из cookie ---
+    // 1) токен из cookie
     const rawCookie = req.headers.cookie || "";
     const m = rawCookie.match(/(?:^|;\s*)cm_session=([^;]+)/);
     const cookieToken = m ? m[1] : null;
 
-    // --- 2) токен из Authorization: Bearer xxx ---
+    // 2) токен из Authorization: Bearer xxx
     const authHeader = req.headers.authorization || "";
     const mAuth = authHeader.match(/^Bearer (.+)$/i);
     const headerToken = mAuth ? mAuth[1] : null;
 
-    // --- 3) токен из query (?cm_token=... | ?token=...) ---
+    // 3) токен из query (?cm_token=... | ?token=...)
     const urlToken =
       (req.query && (req.query.cm_token || req.query.token)) || null;
 
     const token = cookieToken || headerToken || urlToken;
-
     const sess = verifySession(token);
+
     if (!sess?.uid) {
-      // не авторизован
       return res.json({ ok: false });
     }
 
