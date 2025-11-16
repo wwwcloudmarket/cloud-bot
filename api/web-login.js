@@ -1,4 +1,3 @@
-// api/web-login.js
 import crypto from "node:crypto";
 import { sb } from "../lib/db.js";
 
