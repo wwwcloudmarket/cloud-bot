@@ -5,7 +5,7 @@ import { sb } from "../lib/db.js";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEB_JWT_SECRET = process.env.WEB_JWT_SECRET;
 
-// домен Тильды / сайта, который будет ходить к API
+// домен Тильды / сайта
 const TILDA_ORIGIN = process.env.TILDA_ORIGIN || "https://wwwcloudmarket.ru";
 
 // страница ЛК, куда редиректим после логина через Telegram-widget
@@ -16,7 +16,7 @@ function verifyTelegramInitData(data) {
 
   const { hash, ...rest } = data;
 
-  // необязательно, но полезно: не принимать сильно старые логины
+  // опционально — не принимать сильно старые логины
   if (rest.auth_date) {
     const authDate = Number(rest.auth_date);
     const now = Math.floor(Date.now() / 1000);
@@ -55,7 +55,6 @@ function signSession(payload) {
 
 // ——— CORS
 function cors(req, res) {
-  // если запрос прилетел с Тильды/сайта — зеркалим origin
   const originHeader = req.headers.origin;
   const origin =
     originHeader && originHeader.startsWith("http")
@@ -72,7 +71,6 @@ function cors(req, res) {
 export default async function handler(req, res) {
   cors(req, res);
 
-  // preflight для фронта (на будущее)
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -85,7 +83,6 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "server misconfigured" });
     }
 
-    // Telegram-widget обычно шлёт GET с query, но оставим поддержку POST
     const data =
       req.method === "POST"
         ? typeof req.body === "string"
@@ -121,7 +118,6 @@ export default async function handler(req, res) {
       return res.status(500).json({ ok: false, error: "db error" });
     }
 
-    // создаём сессию (cm_session)
     const sessionPayload = {
       uid: tgId,
       username: data.username || null,
@@ -130,13 +126,13 @@ export default async function handler(req, res) {
 
     const cookieVal = signSession(sessionPayload);
 
-    // host-only cookie для домена API (Vercel-домен)
+    // host-only cookie для домена API
     res.setHeader(
       "Set-Cookie",
       `cm_session=${cookieVal}; Path=/; HttpOnly; SameSite=None; Max-Age=2592000; Secure`
     );
 
-    // РЕДИРЕКТ НА ЛК С ТОКЕНОМ В QUERY (?cm_token=...)
+    // РЕДИРЕКТИМ НА /lk С ТОКЕНОМ В QUERY (?cm_token=...)
     const url = new URL(LK_URL);
     url.searchParams.set("cm_token", cookieVal);
 
