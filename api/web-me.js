@@ -1,4 +1,3 @@
-// api/web-me.js
 import crypto from "node:crypto";
 import { sb } from "../lib/db.js";
 
@@ -35,10 +34,7 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "content-type,authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "content-type,authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 }
 
@@ -52,22 +48,17 @@ export default async function handler(req, res) {
 
   try {
     if (!WEB_JWT_SECRET) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "server misconfigured" });
+      return res.status(500).json({ ok: false, error: "server misconfigured" });
     }
 
-    // 1) токен из cookie
     const rawCookie = req.headers.cookie || "";
     const m = rawCookie.match(/(?:^|;\s*)cm_session=([^;]+)/);
     const cookieToken = m ? m[1] : null;
 
-    // 2) токен из Authorization: Bearer xxx
     const authHeader = req.headers.authorization || "";
     const mAuth = authHeader.match(/^Bearer (.+)$/i);
     const headerToken = mAuth ? mAuth[1] : null;
 
-    // 3) токен из query (?cm_token=... | ?token=...)
     const urlToken =
       (req.query && (req.query.cm_token || req.query.token)) || null;
 
@@ -78,7 +69,6 @@ export default async function handler(req, res) {
       return res.json({ ok: false });
     }
 
-    // 1) Профиль
     const { data: user, error: userErr } = await sb
       .from("users")
       .select(
@@ -91,7 +81,6 @@ export default async function handler(req, res) {
       return res.json({ ok: false });
     }
 
-    // 2) Победы (winners + raffles)
     const { data: wins = [] } = await sb
       .from("winners")
       .select(
@@ -118,7 +107,6 @@ export default async function handler(req, res) {
       release_code: w.raffles?.release_code || null,
     }));
 
-    // 3) Заказы (orders)
     const { data: orders = [] } = await sb
       .from("orders")
       .select(
@@ -127,7 +115,6 @@ export default async function handler(req, res) {
       .eq("tg_user_id", sess.uid)
       .order("created_at", { ascending: false });
 
-    // 4) Мои вещи
     const { data: items = [] } = await sb
       .from("owned_items")
       .select("id, title, size, color, acquired_at, source, image_url")
