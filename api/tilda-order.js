@@ -1,38 +1,17 @@
 // api/tilda-order.js
 import { sb } from "../lib/db.js";
 
-/**
- * Хук для заказов из Tilda.
- * Ожидаем, что Tilda шлёт POST (лучше в формате JSON).
- * В Supabase должны быть таблицы:
- *  - profiles (id, email, full_name, phone, ... )
- *  - orders   (id, user_id, tilda_order_id, status, total_amount, currency, payment_method, delivery_method, comment, promocode, raw_payload, created_at ...)
- *  - order_items (id, order_id, product_title, product_sku, price, quantity, size, color, ... )
- */
+// Печать запроса для отладки
+console.log("Received data:", req.body);
 
 export default async function handler(req, res) {
-  // CORS (если будешь дергать руками через браузер)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
     const body = req.body || {};
-
-    // Имена полей можно подстроить под реальные из Tilda.
-    // Самое частое:
-    // orderid, clientemail, clientname, clientphone, products, payment, delivery, comment, promocode, amount, currency
+    console.log("Request Body:", body);  // Печать всего тела запроса для отладки
 
     const {
       orderid,
@@ -47,6 +26,9 @@ export default async function handler(req, res) {
       amount,
       currency,
     } = body;
+
+    // Отладочные логи
+    console.log("Order Details:", { orderid, clientemail, clientname, clientphone });
 
     // ---------- 1. Находим или создаём профиль по email ----------
     let userId = null;
@@ -90,14 +72,14 @@ export default async function handler(req, res) {
       .insert({
         tilda_order_id: orderid,
         user_id: userId,
-        status: "new", // стартовый статус
+        status: "new", 
         payment_method: payment || null,
         delivery_method: delivery || null,
         comment: comment || null,
         promocode: promocode || null,
         total_amount: amount ? Number(amount) : null,
         currency: currency || "RUB",
-        raw_payload: body, // сохраняем весь оригинальный объект на всякий случай
+        raw_payload: body, 
       })
       .select()
       .single();
@@ -114,9 +96,9 @@ export default async function handler(req, res) {
 
     if (products) {
       try {
-        // В Tilda часто products — это JSON-строка.
         parsedProducts =
           typeof products === "string" ? JSON.parse(products) : products;
+        console.log("Parsed Products:", parsedProducts); // Печать товаров для отладки
       } catch (e) {
         console.error("Products parse error:", e);
       }
@@ -139,7 +121,6 @@ export default async function handler(req, res) {
 
       if (itemsError) {
         console.error("Order items insert error:", itemsError);
-        // не роняем весь запрос, просто логируем
       }
     }
 
