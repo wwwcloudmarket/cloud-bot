@@ -12,6 +12,7 @@ export default async function handler(req, res) {
     const body = req.body || {};
     console.log("Request Body:", JSON.stringify(body, null, 2));  // Логирование всего тела запроса
 
+    // Логируем поля по отдельности, чтобы убедиться, что они приходят
     const {
       orderid,
       clientemail,
@@ -25,6 +26,20 @@ export default async function handler(req, res) {
       amount,
       currency,
     } = body;
+
+    console.log("Parsed Fields:", {
+      orderid,
+      clientemail,
+      clientname,
+      clientphone,
+      products,
+      payment,
+      delivery,
+      comment,
+      promocode,
+      amount,
+      currency,
+    });
 
     // Проверка, что все необходимые поля присутствуют
     if (!orderid || !clientemail || !clientname || !products) {
