@@ -1,17 +1,17 @@
 // api/tilda-order.js
-import { sb } from "../lib/db.js";
+const { sb } = require("../lib/db.js");
 
-// Печать запроса для отладки
-console.log("Received data:", req.body);
+module.exports = async (req, res) => {
+  console.log("Received request:", req.method);  // Логирование метода запроса
 
-export default async function handler(req, res) {
   if (req.method !== "POST") {
+    console.log("Invalid method");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
     const body = req.body || {};
-    console.log("Request Body:", body);  // Печать всего тела запроса для отладки
+    console.log("Request Body:", JSON.stringify(body, null, 2));  // Логирование всего тела запроса
 
     const {
       orderid,
@@ -27,8 +27,11 @@ export default async function handler(req, res) {
       currency,
     } = body;
 
-    // Отладочные логи
-    console.log("Order Details:", { orderid, clientemail, clientname, clientphone });
+    // Проверка, что все необходимые поля присутствуют
+    if (!orderid || !clientemail || !clientname || !products) {
+      console.log("Missing required fields:", { orderid, clientemail, clientname, products });
+      return res.status(400).json({ error: "Missing required fields" });
+    }
 
     // ---------- 1. Находим или создаём профиль по email ----------
     let userId = null;
@@ -42,6 +45,7 @@ export default async function handler(req, res) {
 
       if (profileError) {
         console.error("Profile select error:", profileError);
+        return res.status(500).json({ error: "Profile select error" });
       }
 
       if (existingProfile) {
@@ -90,6 +94,7 @@ export default async function handler(req, res) {
     }
 
     const orderId = order.id;
+    console.log("Order created:", orderId);
 
     // ---------- 3. Сохраняем товары заказа ----------
     let parsedProducts = [];
@@ -101,6 +106,7 @@ export default async function handler(req, res) {
         console.log("Parsed Products:", parsedProducts); // Печать товаров для отладки
       } catch (e) {
         console.error("Products parse error:", e);
+        return res.status(500).json({ error: "Error parsing products" });
       }
     }
 
@@ -121,6 +127,7 @@ export default async function handler(req, res) {
 
       if (itemsError) {
         console.error("Order items insert error:", itemsError);
+        return res.status(500).json({ error: "Error saving order items" });
       }
     }
 
@@ -129,4 +136,4 @@ export default async function handler(req, res) {
     console.error("Tilda hook error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
-}
+};
