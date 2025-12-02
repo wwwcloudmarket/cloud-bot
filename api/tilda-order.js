@@ -1,7 +1,6 @@
-// api/tilda-order.js
-const { sb } = require("../lib/db.js");
+import { sb } from "../lib/db.js";
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   console.log("Received request:", req.method);  // Логирование метода запроса
 
   if (req.method !== "POST") {
@@ -136,4 +135,4 @@ module.exports = async (req, res) => {
     console.error("Tilda hook error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
-};
+}
